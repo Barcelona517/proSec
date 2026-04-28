@@ -1,0 +1,28 @@
+{
+  "attach": {
+    "ok": true,
+    "window_title": "好望角 03.04等8个会话",
+    "backend": "uia",
+    "launched": false
+  },
+  "entries": [
+    {
+      "text": "我把一个文件开着就一直可以监听有没有发消息",
+      "side": "incoming",
+      "top": "476",
+      "left": "1098"
+    },
+    {
+      "text": "但是因为这个文件现在机制不太成熟",
+      "side": "incoming",
+      "top": "600",
+      "left": "1238"
+    },
+    {
+      "text": "所以一会儿开一会儿关",
+      "side": "incoming",
+      "top": "724",
+      "left": "1406"
+    }
+  ]
+}

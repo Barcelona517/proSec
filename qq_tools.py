@@ -87,8 +87,20 @@ class QQAutomation:
 
     def preview_send_targets(self, name: str) -> dict[str, Any]:
         _, window = self._connect()
+        if self._is_target_chat_active(window, name):
+            return {
+                "query": name,
+                "visible_candidates": [name],
+                "can_send_safely": True,
+                "selected_name": name,
+            }
         visible = self.list_chats(limit=50)
         candidates = self._match_chat_names(visible, name)
+        if not candidates:
+            self._focus_search_and_filter(window, name)
+            time.sleep(0.6)
+            visible = self.list_chats(limit=50)
+            candidates = self._match_chat_names(visible, name)
         return {
             "query": name,
             "visible_candidates": candidates[:10],
@@ -98,7 +110,9 @@ class QQAutomation:
 
     def open_chat(self, name: str) -> dict[str, Any]:
         _, window = self._connect()
-        target = self._resolve_chat_control(window, name, allow_fuzzy=True)
+        if self._is_target_chat_active(window, name):
+            return {"ok": True, "opened_chat": name}
+        target = self._resolve_chat_control_with_search(window, name, allow_fuzzy=True)
         try:
             self._activate_chat(window, target, name)
         except Exception as exc:  # noqa: BLE001
@@ -111,8 +125,9 @@ class QQAutomation:
 
         _, window = self._connect()
         exact_name = confirmed_name.strip() or self._resolve_single_chat_name(window, name)
-        target = self._resolve_chat_control(window, exact_name, allow_fuzzy=False)
-        self._activate_chat(window, target, exact_name)
+        if not self._is_target_chat_active(window, exact_name):
+            target = self._resolve_chat_control_with_search(window, exact_name, allow_fuzzy=False)
+            self._activate_chat(window, target, exact_name)
         self._ensure_safe_foreground(window, exact_name)
 
         editor = self._find_message_editor(window)
@@ -140,19 +155,45 @@ class QQAutomation:
         return {"ok": True, "chat": exact_name, "sent_chars": len(content)}
 
     def read_messages(self, limit: int = 20) -> list[str]:
+        entries = self.read_message_entries(limit=limit)
+        return [entry["text"] for entry in entries]
+
+    def read_message_entries(self, limit: int = 20) -> list[dict[str, str]]:
         _, window = self._connect()
-        texts: list[str] = []
+        layout = self._compute_layout(window)
+        entries: list[dict[str, str]] = []
         try:
             for ctrl in window.descendants(control_type="Text"):
                 text = self._safe_window_text(ctrl).strip()
-                if text and len(text) <= 500:
-                    texts.append(text)
+                if not self._looks_like_chat_message_text(text):
+                    continue
+                try:
+                    rect = ctrl.rectangle()
+                except Exception:
+                    continue
+                if not self._is_message_text_rect(rect, layout):
+                    continue
+                side = "outgoing" if self._is_outgoing_rect(rect, layout) else "incoming"
+                entries.append(
+                    {
+                        "text": text,
+                        "side": side,
+                        "top": str(rect.top),
+                        "left": str(rect.left),
+                    }
+                )
         except Exception as exc:  # noqa: BLE001
             raise QQAutomationError(f"读取 QQ 消息失败: {exc}") from exc
-        deduped: list[str] = []
-        for text in texts:
-            if text not in deduped:
-                deduped.append(text)
+
+        entries.sort(key=lambda item: (int(item["top"]), int(item["left"])))
+        deduped: list[dict[str, str]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for entry in entries:
+            key = (entry["text"], entry["side"], entry["top"])
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(entry)
         return deduped[-limit:]
 
     def search_contact(self, keyword: str, limit: int = 10) -> list[dict[str, str]]:
@@ -285,6 +326,7 @@ class QQAutomation:
         return result
 
     def _collect_chat_items(self, window) -> list[QQChatItem]:
+        layout = self._compute_layout(window)
         candidates: list[QQChatItem] = []
         try:
             for ctrl in window.descendants():
@@ -295,7 +337,7 @@ class QQAutomation:
                     rect = ctrl.rectangle()
                 except Exception:
                     continue
-                if not self._is_sidebar_chat_rect(rect):
+                if not self._is_sidebar_chat_rect(rect, layout):
                     continue
                 text = self._safe_window_text(ctrl).strip()
                 if not self._looks_like_chat_name(text):
@@ -310,14 +352,31 @@ class QQAutomation:
 
     def _match_chat_names(self, visible: list[dict[str, str]], query: str) -> list[str]:
         norm_query = query.strip().lower()
-        names = [str(item.get("name", "")).strip() for item in visible if str(item.get("name", "")).strip()]
-        exact = [name for name in names if name.lower() == norm_query]
+        items = []
+        for item in visible:
+            name = str(item.get("name", "")).strip()
+            if not name:
+                continue
+            control_type = str(item.get("control_type", "")).strip()
+            items.append({"name": name, "control_type": control_type})
+
+        exact = [item for item in items if item["name"].lower() == norm_query]
         if exact:
-            return exact
-        fuzzy = [name for name in names if norm_query in name.lower()]
-        return fuzzy
+            exact.sort(key=self._chat_item_priority)
+            return [item["name"] for item in exact]
+
+        prefix = [item for item in items if item["name"].lower().startswith(norm_query)]
+        if prefix:
+            prefix.sort(key=self._chat_item_priority)
+            return [item["name"] for item in prefix]
+
+        fuzzy = [item for item in items if norm_query in item["name"].lower()]
+        fuzzy.sort(key=self._chat_item_priority)
+        return [item["name"] for item in fuzzy]
 
     def _resolve_single_chat_name(self, window, query: str) -> str:
+        if self._is_target_chat_active(window, query):
+            return query
         visible = self.list_chats(limit=50)
         matches = self._match_chat_names(visible, query)
         if len(matches) == 1:
@@ -333,6 +392,14 @@ class QQAutomation:
             names = "、".join(matches[:6])
             raise QQAutomationError(f"找到多个可能匹配 `{query}` 的会话：{names}。请使用更精确的会话名。")
         raise QQAutomationError(f"没有精确找到会话 `{query}`。为避免误发，本次不会发送。")
+
+    def _resolve_chat_control_with_search(self, window, name: str, allow_fuzzy: bool):
+        try:
+            return self._resolve_chat_control(window, name, allow_fuzzy=allow_fuzzy)
+        except QQAutomationError:
+            self._focus_search_and_filter(window, name)
+            time.sleep(0.6)
+            return self._resolve_chat_control(window, name, allow_fuzzy=allow_fuzzy)
 
     def _resolve_chat_control(self, window, name: str, allow_fuzzy: bool):
         norm_target = name.strip().lower()
@@ -354,12 +421,13 @@ class QQAutomation:
         else:
             raise QQAutomationError(f"没有精确找到会话 `{name}`。为避免误发，本次不会发送。")
 
+        layout = self._compute_layout(window)
         for ctrl in window.descendants():
             try:
                 rect = ctrl.rectangle()
             except Exception:
                 continue
-            if not self._is_sidebar_chat_rect(rect):
+            if not self._is_sidebar_chat_rect(rect, layout):
                 continue
             text = self._safe_window_text(ctrl).strip()
             control_type = getattr(ctrl.element_info, "control_type", "") or ""
@@ -421,20 +489,81 @@ class QQAutomation:
         except Exception:
             return 10**9
 
-    def _is_sidebar_chat_rect(self, rect) -> bool:
+    def _compute_layout(self, window) -> dict[str, int]:
+        try:
+            rect = window.rectangle()
+            left, top, right, bottom = rect.left, rect.top, rect.right, rect.bottom
+        except Exception:
+            left, top, right, bottom = 0, 0, 2500, 1800
+        width = max(1, right - left)
+        height = max(1, bottom - top)
+        return {
+            "left": left,
+            "top": top,
+            "right": right,
+            "bottom": bottom,
+            "width": width,
+            "height": height,
+            "sidebar_right": left + int(width * 0.22),
+            "sidebar_top": top + int(height * 0.17),
+            "sidebar_bottom": top + int(height * 0.74),
+            "content_left": left + int(width * 0.18),
+            "content_top": top + int(height * 0.18),
+            "content_bottom": top + int(height * 0.83),
+            "outgoing_split": left + int(width * 0.52),
+            "input_top": top + int(height * 0.78),
+        }
+
+    def _is_sidebar_chat_rect(self, rect, layout: dict[str, int]) -> bool:
         try:
             left, top, right, bottom = rect.left, rect.top, rect.right, rect.bottom
         except Exception:
             return False
         width = right - left
         height = bottom - top
-        if left > 520:
+        if left > layout["sidebar_right"]:
             return False
-        if top < 340 or bottom > 1320:
+        if top < layout["sidebar_top"] or bottom > layout["sidebar_bottom"]:
             return False
         if width < 60 or height < 18:
             return False
         return True
+
+    def _is_message_text_rect(self, rect, layout: dict[str, int]) -> bool:
+        try:
+            left, top, right, bottom = rect.left, rect.top, rect.right, rect.bottom
+        except Exception:
+            return False
+        if left <= 0 and top <= 0 and right <= 0 and bottom <= 0:
+            return False
+        if left < layout["content_left"]:
+            return False
+        if top < layout["content_top"] or bottom > layout["content_bottom"]:
+            return False
+        width = right - left
+        height = bottom - top
+        if width < 20 or height < 10:
+            return False
+        return True
+
+    def _is_outgoing_rect(self, rect, layout: dict[str, int]) -> bool:
+        try:
+            return rect.left >= layout["outgoing_split"]
+        except Exception:
+            return False
+
+    def _chat_item_priority(self, item: dict[str, str]) -> tuple[int, int]:
+        control_type = item.get("control_type", "")
+        name = item.get("name", "")
+        if control_type == "ListItem":
+            type_score = 0
+        elif control_type == "TreeItem":
+            type_score = 1
+        elif control_type == "DataItem":
+            type_score = 2
+        else:
+            type_score = 3
+        return (type_score, len(name))
 
     def _find_message_editor(self, window):
         editors = []
@@ -448,6 +577,7 @@ class QQAutomation:
         return editors[-1] if editors else None
 
     def _find_input_area(self, window):
+        layout = self._compute_layout(window)
         send_button = self._find_send_button(window)
         send_rect = None
         if send_button is not None:
@@ -463,6 +593,8 @@ class QQAutomation:
                 width = rect.width()
                 height = rect.height()
                 if width < 600 or height < 80:
+                    continue
+                if rect.top < layout["input_top"]:
                     continue
                 if send_rect is not None:
                     if rect.bottom > send_rect.top + 10:
@@ -532,6 +664,12 @@ class QQAutomation:
             return False
         if text in {"QQ", "搜索", "消息", "联系人", "群聊", "发送"}:
             return False
+        if text == "聊天记录":
+            return False
+        if text.startswith("进入综合搜索"):
+            return False
+        if text.startswith("查找用户、群聊等"):
+            return False
         if text in {"[图片]", "[动画表情]"}:
             return False
         if text.endswith("："):
@@ -545,6 +683,23 @@ class QQAutomation:
         if any(p in text for p in ("哈哈", "真的吗", "真的", "啊？", "这下看懂了")) and len(text) <= 10:
             return False
         if re.fullmatch(r"[\d:\-\s]+", text):
+            return False
+        return True
+
+    def _looks_like_chat_message_text(self, text: str) -> bool:
+        if not text or len(text) > 500:
+            return False
+        if text in {"搜索", "聊天记录", "发送", "图片", "文件", "表情", "QQ经典农场", "QQ小程序"}:
+            return False
+        if text.startswith("进入综合搜索") or text.startswith("查找用户、群聊等"):
+            return False
+        if text.endswith("："):
+            return False
+        if re.fullmatch(r"\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}", text):
+            return False
+        if re.fullmatch(r"\d{1,2}:\d{2}", text):
+            return False
+        if text in {"好望角 03.04", "包身工"}:
             return False
         return True
 

@@ -30,13 +30,32 @@ def main() -> None:
     print(f"Watching chats: {chats}")
     print(f"Interval: {interval}s | limit: {limit} | dry_run: {dry_run} | bootstrap: {bootstrap}")
 
+    active_chats = list(chats)
+
     if bootstrap:
+        bootstrapped: list[str] = []
+        failed: list[str] = []
         for chat in chats:
-            result = bootstrap_auto_reply_state(chat, limit=limit)
-            print(f"[bootstrap] {chat}: {result['status']}")
+            try:
+                result = bootstrap_auto_reply_state(chat, limit=limit)
+                print(f"[bootstrap] {chat}: {result['status']}")
+                bootstrapped.append(chat)
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                print(f"[bootstrap-error] {chat}: {exc}")
+                failed.append(chat)
+
+        if bootstrapped:
+            active_chats = bootstrapped
+        if failed:
+            print(f"[bootstrap-skip] failed chats: {failed}")
+
+    if not active_chats:
+        raise SystemExit("No chats could be bootstrapped successfully. Please verify QQ can recognize at least one target chat.")
 
     while True:
-        for chat in chats:
+        for chat in list(active_chats):
             try:
                 result = auto_reply_once(chat, limit=limit, dry_run=dry_run)
                 status = result.get("status", "unknown")

@@ -1,0 +1,103 @@
+{
+  "window_title": "包身工等3个会话",
+  "visible": [
+    {
+      "name": "包身工 (10人)",
+      "control_type": "ListItem",
+      "automation_id": "amoifa1s5"
+    },
+    {
+      "name": "包身工",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "聊天记录",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "2025级糖宝宝 计算机技术与科学 包身工",
+      "control_type": "ListItem",
+      "automation_id": "amoifa1s6"
+    },
+    {
+      "name": "2025级糖宝宝 计算机技术与科学",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "进入综合搜索包身工 查找用户、群聊等",
+      "control_type": "ListItem",
+      "automation_id": "a6at48sevc"
+    },
+    {
+      "name": "进入综合搜索",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "查找用户、群聊等",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "我累铜泥丸🥷",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "啥时候去（待定）？！",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "好望角 03.04",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "放我们群是要被导员撤回的",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "瓜兵--乡里人",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "啥玩意",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "全能李神",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "这个哥们实名都不敢",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "@皇帝🤴",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "可以罢免皇帝🤴的霍光",
+      "control_type": "Text",
+      "automation_id": ""
+    }
+  ],
+  "preview": {
+    "query": "包身工",
+    "visible_candidates": [
+      "包身工"
+    ],
+    "can_send_safely": true,
+    "selected_name": "包身工"
+  }
+}
