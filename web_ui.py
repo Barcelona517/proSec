@@ -16,6 +16,9 @@ from config import HISTORY_FILE, MODEL_NAME, WORKSPACE_ROOT
 from main import load_history, run_agent, save_history
 
 
+os.environ["no_proxy"] = "localhost,127.0.0.1"
+os.environ["NO_PROXY"] = "localhost,127.0.0.1"
+
 CONVERSATIONS_FILE = HISTORY_FILE.with_name("conversations.json")
 
 
@@ -24,32 +27,26 @@ def _now_iso() -> str:
 
 
 def _make_title_from_messages(messages: list[dict]) -> str:
-    keyword_titles = [
-        (["界面", "ui", "布局", "页面", "样式", "按钮"], "界面布局调整"),
-        (["历史", "会话", "多轮", "上下文"], "历史会话与上下文"),
-        (["读取", "read", "文件", "目录", "list"], "文件读取与浏览"),
-        (["写入", "保存", "write", "创建"], "文件写入操作"),
-        (["报错", "错误", "异常", "失败", "error"], "问题排查与修复"),
-        (["端口", "启动", "运行", "web_ui", "gradio"], "服务启动配置"),
-        (["模型", "deepseek", "api", "key"], "模型与密钥配置"),
-    ]
-
     for item in messages:
-        if item.get("role") == "user":
-            content = str(item.get("content", "")).strip()
-            if content:
-                lowered = content.lower()
-                for kws, title in keyword_titles:
-                    if any(k in lowered for k in kws):
-                        return title
-
-                cleaned = re.sub(r"[\r\n]+", " ", content)
-                cleaned = re.sub(r"^(请问|请|帮我|麻烦|你能|可以|我想|能不能|是否)\s*", "", cleaned)
-                cleaned = re.sub(r"\s+", " ", cleaned).strip(" ，。！？,.!?：:;；")
-                if not cleaned:
-                    return "新对话"
-                return cleaned[:14] + ("..." if len(cleaned) > 14 else "")
+        if item.get("role") != "user":
+            continue
+        content = str(item.get("content", "")).strip()
+        if not content:
+            continue
+        cleaned = re.sub(r"[\r\n]+", " ", content)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.!?;:，。！？；：")
+        return cleaned[:18] + ("..." if len(cleaned) > 18 else "")
     return "新对话"
+
+
+def _normalize_conversation(conv: dict) -> dict:
+    return {
+        "id": str(conv.get("id") or uuid4()),
+        "title": str(conv.get("title") or "新对话"),
+        "updated_at": str(conv.get("updated_at") or _now_iso()),
+        "messages": list(conv.get("messages") or []),
+        "pinned": bool(conv.get("pinned", False)),
+    }
 
 
 def _new_conversation(messages: list[dict] | None = None) -> dict:
@@ -59,18 +56,18 @@ def _new_conversation(messages: list[dict] | None = None) -> dict:
         "title": _make_title_from_messages(msgs),
         "updated_at": _now_iso(),
         "messages": msgs,
+        "pinned": False,
     }
 
 
-def _persist_conversations(conversations: list[dict], active_id: str) -> None:
-    payload = {
-        "active_id": active_id,
-        "conversations": conversations,
-    }
-    CONVERSATIONS_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    active = _find_conversation(conversations, active_id)
-    save_history(HISTORY_FILE, active.get("messages", []))
+def _sort_conversations(conversations: list[dict]) -> list[dict]:
+    return sorted(
+        conversations,
+        key=lambda c: (
+            0 if c.get("pinned") else 1,
+            -(datetime.fromisoformat(str(c.get("updated_at", _now_iso()))).timestamp()),
+        ),
+    )
 
 
 def _find_conversation(conversations: list[dict], conv_id: str) -> dict:
@@ -80,17 +77,24 @@ def _find_conversation(conversations: list[dict], conv_id: str) -> dict:
     return conversations[0]
 
 
+def _persist_conversations(conversations: list[dict], active_id: str) -> None:
+    payload = {"active_id": active_id, "conversations": conversations}
+    CONVERSATIONS_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    active = _find_conversation(conversations, active_id)
+    save_history(HISTORY_FILE, active.get("messages", []))
+
+
 def _load_or_init_conversations() -> tuple[list[dict], str]:
     if CONVERSATIONS_FILE.exists():
         try:
             data = json.loads(CONVERSATIONS_FILE.read_text(encoding="utf-8"))
             conversations = data.get("conversations", [])
-            active_id = data.get("active_id", "")
+            active_id = str(data.get("active_id", ""))
             if isinstance(conversations, list) and conversations:
-                convs = [c for c in conversations if isinstance(c, dict) and "id" in c and "messages" in c]
+                convs = [_normalize_conversation(c) for c in conversations if isinstance(c, dict)]
                 if convs:
                     if not any(c.get("id") == active_id for c in convs):
-                        active_id = convs[0].get("id", "")
+                        active_id = convs[0]["id"]
                     return convs, active_id
         except json.JSONDecodeError:
             pass
@@ -102,41 +106,46 @@ def _load_or_init_conversations() -> tuple[list[dict], str]:
     return conversations, first["id"]
 
 
-def _conversation_choices(conversations: list[dict]) -> list[tuple[str, str]]:
-    choices: list[tuple[str, str]] = []
-    for conv in sorted(conversations, key=lambda c: c.get("updated_at", ""), reverse=True):
-        title = _make_title_from_messages(conv.get("messages", []))
-        if title == "新对话":
-            title = str(conv.get("title", "新对话"))
-        updated = str(conv.get("updated_at", ""))
-        stamp = updated.replace("T", " ")[:16]
-        choices.append((f"{title}  ·  {stamp}", str(conv.get("id"))))
-    return choices
+def _render_history_sidebar(conversations: list[dict], active_id: str) -> str:
+    items: list[str] = []
+    for conv in _sort_conversations(conversations):
+        conv_id = str(conv["id"])
+        title = escape(str(conv.get("title") or "新对话"))
+        updated = escape(str(conv.get("updated_at", "")).replace("T", " ")[:16])
+        active_class = " active" if conv_id == active_id else ""
+        pin_mark = "<span class='history-pin'>置顶</span>" if conv.get("pinned") else ""
+        pin_text = "取消固定" if conv.get("pinned") else "固定"
+        items.append(
+            f"""
+            <div class="history-item{active_class}" data-conv-id="{conv_id}">
+              <button class="history-main" onclick="window.__historyAction('select', '{conv_id}')">
+                <div class="history-title-row">
+                  <span class="history-title">{title}</span>
+                  {pin_mark}
+                </div>
+                <div class="history-time">{updated}</div>
+              </button>
+              <div class="history-menu-wrap">
+                <button class="history-menu-btn" onclick="window.__toggleHistoryMenu(event, '{conv_id}')">•••</button>
+                <div class="history-menu" id="history-menu-{conv_id}">
+                  <button onclick="window.__historyRename('{conv_id}')">重命名</button>
+                  <button onclick="window.__historyAction('pin', '{conv_id}')">{pin_text}</button>
+                  <button class="danger" onclick="window.__historyAction('delete', '{conv_id}')">删除</button>
+                </div>
+              </div>
+            </div>
+            """
+        )
+    return "<div class='history-list-wrap'>" + "".join(items) + "</div>"
 
 
 def _format_assistant_content(thought: str, answer: str) -> str:
-    safe_answer = escape(answer or "")
+    answer = (answer or "").strip()
     thought = (thought or "").strip()
     if thought and thought != answer:
-        safe_thought = escape(thought)
-        return (
-            f"<div class='ai-thought'>思考: {safe_thought}</div>"
-            f"<div class='ai-answer'>回答: {safe_answer}</div>"
-        )
-    return f"<div class='ai-answer'>{safe_answer}</div>"
-
-
-def _build_history_sidebar(agent_history: list[dict]) -> str:
-    user_msgs = [m.get("content", "") for m in agent_history if m.get("role") == "user"]
-    user_msgs = [str(x).strip() for x in user_msgs if str(x).strip()]
-    if not user_msgs:
-        return "暂无历史对话"
-
-    lines = []
-    for idx, text in enumerate(user_msgs[-20:], 1):
-        short = text if len(text) <= 28 else f"{text[:28]}..."
-        lines.append(f"{idx}. {short}")
-    return "\n".join(lines)
+        safe_thought = escape(thought).replace("\n", "<br>")
+        return f"<div class='ai-thought'>{safe_thought}</div>{answer}"
+    return answer
 
 
 def _history_to_chat_messages(agent_history: list[dict]) -> list[dict[str, str]]:
@@ -160,9 +169,9 @@ def _submit_message(
     chat_messages: list[dict[str, str]] | None,
     conversations: list[dict] | None,
     current_conv_id: str,
-) -> tuple[list[dict[str, str]], list[dict], str, str, gr.update]:
+) -> tuple[list[dict[str, str]], list[dict], str, str, str]:
     user_message = (user_message or "").strip()
-    convs = list(conversations or [])
+    convs = [_normalize_conversation(c) for c in list(conversations or [])]
     if not convs:
         convs, current_conv_id = _load_or_init_conversations()
 
@@ -175,119 +184,279 @@ def _submit_message(
             convs,
             current_conv_id,
             "",
-            gr.update(choices=_conversation_choices(convs), value=current_conv_id),
+            _render_history_sidebar(convs, current_conv_id),
         )
 
     ui_messages = list(chat_messages or [])
-    current_agent_history = list(agent_history)
-
     try:
         buf = io.StringIO()
         with redirect_stdout(buf):
-            answer, new_agent_history = run_agent(user_message, current_agent_history)
+            answer, new_agent_history = run_agent(user_message, agent_history)
         logs = buf.getvalue().splitlines()
         thoughts = [line.split("Thought/Reply:", 1)[1].strip() for line in logs if "Thought/Reply:" in line]
         thought_text = "\n".join([t for t in thoughts if t])
 
         current_conv["messages"] = new_agent_history
-        current_conv["title"] = _make_title_from_messages(new_agent_history)
+        if current_conv.get("title") in {"", "新对话"} or len(agent_history) == 0:
+            current_conv["title"] = _make_title_from_messages(new_agent_history)
         current_conv["updated_at"] = _now_iso()
         _persist_conversations(convs, current_conv_id)
 
         ui_messages.append({"role": "user", "content": user_message})
-        ui_messages.append(
-            {
-                "role": "assistant",
-                "content": _format_assistant_content(thought_text, answer),
-            }
-        )
-        return (
-            ui_messages,
-            convs,
-            current_conv_id,
-            "",
-            gr.update(choices=_conversation_choices(convs), value=current_conv_id),
-        )
+        ui_messages.append({"role": "assistant", "content": _format_assistant_content(thought_text, answer)})
+        return ui_messages, convs, current_conv_id, "", _render_history_sidebar(convs, current_conv_id)
     except Exception as exc:  # noqa: BLE001
         ui_messages.append({"role": "user", "content": user_message})
-        ui_messages.append(
-            {
-                "role": "assistant",
-                "content": _format_assistant_content("", f"Agent Error: {exc}"),
-            }
-        )
-        return (
-            ui_messages,
+        ui_messages.append({"role": "assistant", "content": _format_assistant_content("", f"Agent Error: {exc}")})
+        return ui_messages, convs, current_conv_id, "", _render_history_sidebar(convs, current_conv_id)
+
+
+def _submit_message_stream(
+    user_message: str,
+    chat_messages: list[dict[str, str]] | None,
+    conversations: list[dict] | None,
+    current_conv_id: str,
+):
+    user_message = (user_message or "").strip()
+    convs = [_normalize_conversation(c) for c in list(conversations or [])]
+    if not convs:
+        convs, current_conv_id = _load_or_init_conversations()
+
+    current_conv = _find_conversation(convs, current_conv_id)
+    agent_history = list(current_conv.get("messages", []))
+    if not user_message:
+        yield (
+            chat_messages or _history_to_chat_messages(agent_history),
             convs,
             current_conv_id,
             "",
-            gr.update(choices=_conversation_choices(convs), value=current_conv_id),
+            _render_history_sidebar(convs, current_conv_id),
         )
+        return
+
+    thinking_messages = list(chat_messages or [])
+    thinking_messages.append({"role": "user", "content": user_message})
+    thinking_messages.append({"role": "assistant", "content": "<div class='ai-thinking'>思考中...</div>"})
+    yield thinking_messages, convs, current_conv_id, user_message, _render_history_sidebar(convs, current_conv_id)
+
+    yield _submit_message(user_message, chat_messages, convs, current_conv_id)
 
 
-def _select_conversation(conv_id: str, conversations: list[dict]) -> tuple[list[dict[str, str]], str]:
-    convs = list(conversations or [])
+def _select_conversation(conv_id: str, conversations: list[dict]) -> tuple[list[dict[str, str]], str, str]:
+    convs = [_normalize_conversation(c) for c in list(conversations or [])]
     if not convs:
         convs, conv_id = _load_or_init_conversations()
     selected = _find_conversation(convs, conv_id)
     save_history(HISTORY_FILE, selected.get("messages", []))
-    return _history_to_chat_messages(selected.get("messages", [])), str(selected.get("id"))
+    return _history_to_chat_messages(selected.get("messages", [])), str(selected.get("id")), _render_history_sidebar(convs, str(selected.get("id")))
 
 
-def _new_chat(conversations: list[dict]) -> tuple[gr.update, list[dict], str, list[dict[str, str]], str]:
-    convs = list(conversations or [])
+def _new_chat(conversations: list[dict]) -> tuple[str, list[dict], str, list[dict[str, str]], str]:
+    convs = [_normalize_conversation(c) for c in list(conversations or [])]
     conv = _new_conversation([])
     convs.append(conv)
     active_id = conv["id"]
     _persist_conversations(convs, active_id)
+    return _render_history_sidebar(convs, active_id), convs, active_id, [], ""
+
+
+def _handle_history_action(
+    action: str,
+    target_id: str,
+    payload: str,
+    conversations: list[dict] | None,
+    current_conv_id: str,
+) -> tuple[str, list[dict], str, list[dict[str, str]], str]:
+    convs = [_normalize_conversation(c) for c in list(conversations or [])]
+    if not convs:
+        convs, current_conv_id = _load_or_init_conversations()
+
+    action = (action or "").strip()
+    target_id = (target_id or "").strip()
+    payload = (payload or "").strip()
+
+    if action == "select" and target_id:
+        selected = _find_conversation(convs, target_id)
+        active_id = str(selected["id"])
+        save_history(HISTORY_FILE, selected.get("messages", []))
+        return _render_history_sidebar(convs, active_id), convs, active_id, _history_to_chat_messages(selected.get("messages", [])), ""
+
+    if not target_id:
+        return _render_history_sidebar(convs, current_conv_id), convs, current_conv_id, _history_to_chat_messages(_find_conversation(convs, current_conv_id).get("messages", [])), ""
+
+    conv = _find_conversation(convs, target_id)
+
+    if action == "rename":
+        new_title = payload[:40].strip()
+        if new_title:
+            conv["title"] = new_title
+            conv["updated_at"] = _now_iso()
+            _persist_conversations(convs, current_conv_id)
+    elif action == "pin":
+        conv["pinned"] = not bool(conv.get("pinned"))
+        _persist_conversations(convs, current_conv_id)
+    elif action == "delete":
+        convs = [c for c in convs if c.get("id") != target_id]
+        if not convs:
+            new_conv = _new_conversation([])
+            convs = [new_conv]
+            current_conv_id = new_conv["id"]
+        elif current_conv_id == target_id:
+            current_conv_id = _sort_conversations(convs)[0]["id"]
+        _persist_conversations(convs, current_conv_id)
+
+    active = _find_conversation(convs, current_conv_id)
     return (
-        gr.update(choices=_conversation_choices(convs), value=active_id),
+        _render_history_sidebar(convs, current_conv_id),
         convs,
-        active_id,
-        [],
+        current_conv_id,
+        _history_to_chat_messages(active.get("messages", [])),
         "",
     )
 
 
-def _clear_current_chat(
-    conversations: list[dict],
-    current_conv_id: str,
-) -> tuple[list[dict[str, str]], list[dict], str, gr.update, str]:
-    convs = list(conversations or [])
-    if not convs:
-        convs, current_conv_id = _load_or_init_conversations()
-    conv = _find_conversation(convs, current_conv_id)
-    conv["messages"] = []
-    conv["title"] = "新对话"
-    conv["updated_at"] = _now_iso()
-    _persist_conversations(convs, current_conv_id)
-    return [], convs, current_conv_id, gr.update(choices=_conversation_choices(convs), value=current_conv_id), ""
+def _build_client_script() -> str:
+    return """
+    <script>
+    (() => {
+      const setTextboxValue = (selector, value) => {
+        const el = document.querySelector(selector);
+        if (!el) return false;
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set
+          || Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+        if (setter) setter.call(el, value);
+        else el.value = value;
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+        return true;
+      };
+
+      const dispatchHistoryAction = (action, targetId, payload="") => {
+        setTextboxValue("#history-action-box textarea, #history-action-box input", action);
+        setTextboxValue("#history-target-box textarea, #history-target-box input", targetId);
+        setTextboxValue("#history-payload-box textarea, #history-payload-box input", payload);
+        const btn = document.querySelector("#history-dispatch button") || document.querySelector("#history-dispatch");
+        if (btn) btn.click();
+      };
+
+      window.__historyAction = (action, targetId) => {
+        document.querySelectorAll(".history-menu.open").forEach((menu) => menu.classList.remove("open"));
+        if (action === "delete") {
+          const ok = window.confirm("确定删除这条历史对话吗？");
+          if (!ok) return;
+        }
+        dispatchHistoryAction(action, targetId, "");
+      };
+
+      window.__historyRename = (targetId) => {
+        document.querySelectorAll(".history-menu.open").forEach((menu) => menu.classList.remove("open"));
+        const currentTitle = document.querySelector(`.history-item[data-conv-id="${targetId}"] .history-title`)?.innerText || "";
+        const newTitle = window.prompt("输入新的会话名称", currentTitle);
+        if (newTitle && newTitle.trim()) {
+          dispatchHistoryAction("rename", targetId, newTitle.trim());
+        }
+      };
+
+      window.__toggleHistoryMenu = (event, targetId) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const menu = document.getElementById(`history-menu-${targetId}`);
+        if (!menu) return;
+        const alreadyOpen = menu.classList.contains("open");
+        document.querySelectorAll(".history-menu.open").forEach((node) => node.classList.remove("open"));
+        if (!alreadyOpen) menu.classList.add("open");
+      };
+
+      document.addEventListener("click", (event) => {
+        if (!event.target.closest(".history-menu-wrap")) {
+          document.querySelectorAll(".history-menu.open").forEach((menu) => menu.classList.remove("open"));
+        }
+      });
+
+      const bindUi = () => {
+        const chatRoot = document.querySelector("#chat-window");
+        if (!chatRoot) {
+          window.setTimeout(bindUi, 100);
+          return;
+        }
+
+        if (!window.__enterBound) {
+          window.__enterBound = true;
+          document.addEventListener("keydown", (event) => {
+            if (event.target && event.target.matches("#input-box textarea")) {
+              if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+                event.preventDefault();
+                event.stopPropagation();
+                const sendButton = document.querySelector("#send-btn button") || document.querySelector("#send-btn");
+                if (sendButton) sendButton.click();
+              }
+            }
+          }, true);
+        }
+
+        const nodes = [chatRoot, ...chatRoot.querySelectorAll("div")];
+        const scrollBox = nodes.find((node) => {
+          const style = window.getComputedStyle(node);
+          return ["auto", "scroll"].includes(style.overflowY) && node.clientHeight > 0;
+        }) || chatRoot;
+
+        const applyChatLayout = () => {
+          const content = Array.from(scrollBox.children).find((node) => node instanceof HTMLElement) || null;
+          scrollBox.style.overscrollBehavior = "contain";
+          scrollBox.style.paddingBottom = "0";
+          if (content) {
+            content.style.minHeight = "100%";
+            content.style.display = "flex";
+            content.style.flexDirection = "column";
+            content.style.justifyContent = "flex-end";
+          }
+        };
+
+        applyChatLayout();
+
+        if (!chatRoot.dataset.scrollBound) {
+          chatRoot.dataset.scrollBound = "1";
+          const observer = new MutationObserver(() => {
+            window.requestAnimationFrame(() => {
+              applyChatLayout();
+              scrollBox.scrollTop = Math.max(0, scrollBox.scrollHeight - scrollBox.clientHeight);
+            });
+          });
+          observer.observe(chatRoot, { childList: true, subtree: true, characterData: true });
+        }
+      };
+
+      if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", bindUi);
+      else bindUi();
+    })();
+    </script>
+    """
 
 
 def build_demo() -> gr.Blocks:
     conversations, active_id = _load_or_init_conversations()
     active = _find_conversation(conversations, active_id)
     initial_chat_messages = _history_to_chat_messages(active.get("messages", []))
-    initial_choices = _conversation_choices(conversations)
+    initial_history_html = _render_history_sidebar(conversations, active_id)
 
-    with gr.Blocks(title="Mini OpenClaw Chat") as demo:
-        gr.HTML("""
-        <div class="header-wrap">
-          <div class="page-title">pre OpenClaw</div>
-          <div class="page-meta">模型: """ + escape(MODEL_NAME) + """ | 受限目录: """ + escape(str(WORKSPACE_ROOT)) + """</div>
-        </div>
-        """)
+    with gr.Blocks(title="Mini OpenClaw Chat", head=_build_client_script()) as demo:
+        gr.HTML(
+            """
+            <div class="header-wrap">
+              <div class="page-title">pre OpenClaw</div>
+              <div class="page-meta">模型: """
+            + escape(MODEL_NAME)
+            + """ | 工作目录: """
+            + escape(str(WORKSPACE_ROOT))
+            + """</div>
+            </div>
+            """
+        )
 
         with gr.Row(elem_id="main-row"):
-            with gr.Column(scale=3, min_width=260, elem_id="left-panel"):
+            with gr.Column(scale=3, min_width=280, elem_id="left-panel"):
                 gr.Markdown("### 历史对话")
-                history_list = gr.Radio(
-                    choices=initial_choices,
-                    value=active_id,
-                    elem_id="history-list",
-                    interactive=True,
-                    show_label=False,
-                )
+                history_html = gr.HTML(initial_history_html, elem_id="history-list")
                 new_chat_btn = gr.Button("+ 新建对话", elem_id="new-chat-btn")
 
             with gr.Column(scale=9, elem_id="right-panel"):
@@ -295,52 +464,52 @@ def build_demo() -> gr.Blocks:
                     value=initial_chat_messages,
                     buttons=["copy"],
                     layout="bubble",
+                    height="100%",
                     sanitize_html=False,
+                    render_markdown=True,
+                    latex_delimiters=[
+                        {"left": "$$", "right": "$$", "display": True},
+                        {"left": "$", "right": "$", "display": False},
+                        {"left": "\\(", "right": "\\)", "display": False},
+                        {"left": "\\[", "right": "\\]", "display": True},
+                    ],
                     elem_id="chat-window",
                 )
-                message_box = gr.Textbox(
-                    label="输入消息",
-                    placeholder="输入内容后回车或点发送",
-                    lines=3,
-                    elem_id="input-box",
-                    show_label=False,
-                )
-                send_btn = gr.Button(
-                    "<svg t=\"171403\" class=\"send-icon\" viewBox=\"0 0 1024 1024\" version=\"1.1\" xmlns=\"http://www.w3.org/2000/svg\" p-id=\"1714\" width=\"22\" height=\"22\"><path d=\"M928.8 96.6c-8.7-8.7-21.7-11.3-32.9-6.6L95.2 432.2c-12.1 5.1-19.7 17.5-18.2 30.6 1.5 13.1 12.1 23.1 25.3 24.2l353.2 29.2 29.2 353.2c1.1 13.2 11.1 23.8 24.2 25.3 1.1 0.1 2.2 0.2 3.3 0.2 11.5 0 22-6.7 26.9-18.2l342.2-800.7c4.7-11.2 2.1-24.2-6.6-32.9zM464.7 512.7l-312.2-25.8 728.2-308.6-308.6 728.2-25.8-312.2c-1-12.1-10.7-21.8-22.8-22.8z\" p-id=\"1715\"></path></svg>",
-                    elem_id="send-btn",
-                    variant="primary",
-                    scale=0,
-                )
-                with gr.Row(elem_id="actions-row"):
-                    clear_btn = gr.Button("清空当前会话")
+                with gr.Row(elem_id="input-wrap"):
+                    message_box = gr.Textbox(
+                        label="输入",
+                        placeholder="Enter 发送，Shift+Enter 换行",
+                        lines=4,
+                        elem_id="input-box",
+                        show_label=False,
+                        interactive=True,
+                        max_lines=12,
+                        autofocus=True,
+                    )
+                    send_btn = gr.Button("发送", elem_id="send-btn", variant="primary", scale=0)
 
         conversations_state = gr.State(conversations)
         current_conv_id_state = gr.State(active_id)
 
+        history_action = gr.Textbox(value="", elem_id="history-action-box", elem_classes="bridge-hidden")
+        history_target = gr.Textbox(value="", elem_id="history-target-box", elem_classes="bridge-hidden")
+        history_payload = gr.Textbox(value="", elem_id="history-payload-box", elem_classes="bridge-hidden")
+        history_dispatch = gr.Button("dispatch", elem_id="history-dispatch", elem_classes="bridge-hidden")
+
         send_btn.click(
-            fn=_submit_message,
+            fn=_submit_message_stream,
             inputs=[message_box, chatbot, conversations_state, current_conv_id_state],
-            outputs=[chatbot, conversations_state, current_conv_id_state, message_box, history_list],
-        )
-        message_box.submit(
-            fn=_submit_message,
-            inputs=[message_box, chatbot, conversations_state, current_conv_id_state],
-            outputs=[chatbot, conversations_state, current_conv_id_state, message_box, history_list],
-        )
-        history_list.change(
-            fn=_select_conversation,
-            inputs=[history_list, conversations_state],
-            outputs=[chatbot, current_conv_id_state],
+            outputs=[chatbot, conversations_state, current_conv_id_state, message_box, history_html],
         )
         new_chat_btn.click(
             fn=_new_chat,
             inputs=[conversations_state],
-            outputs=[history_list, conversations_state, current_conv_id_state, chatbot, message_box],
+            outputs=[history_html, conversations_state, current_conv_id_state, chatbot, message_box],
         )
-        clear_btn.click(
-            fn=_clear_current_chat,
-            inputs=[conversations_state, current_conv_id_state],
-            outputs=[chatbot, conversations_state, current_conv_id_state, history_list, message_box],
+        history_dispatch.click(
+            fn=_handle_history_action,
+            inputs=[history_action, history_target, history_payload, conversations_state, current_conv_id_state],
+            outputs=[history_html, conversations_state, current_conv_id_state, chatbot, message_box],
         )
 
     return demo
@@ -364,133 +533,242 @@ def _pick_port(preferred: int, max_tries: int = 30) -> int:
 
 
 def main() -> None:
-    demo = build_demo()
+    demo = build_demo().queue()
     preferred_port = int(os.getenv("WEB_PORT", "7860"))
     server_port = _pick_port(preferred_port)
     if server_port != preferred_port:
-        print(f"端口 {preferred_port} 已占用，自动切换到 {server_port}")
-    demo.launch(server_name="127.0.0.1", server_port=server_port, inbrowser=True, css="""
-    html, body, .gradio-container {
-        height: 100vh !important;
-        overflow: hidden !important;
+        print(f"端口 {preferred_port} 已被占用，自动切换到 {server_port}")
+    demo.launch(server_name="127.0.0.1", server_port=server_port, inbrowser=False, css="""
+    html, body {
+        height: 100%;
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
     }
     .gradio-container {
+        height: 100vh !important;
         max-width: 100% !important;
-        padding: 10px 12px 12px 12px !important;
+        padding: 0 !important;
+        display: flex !important;
+        flex-direction: column !important;
+    }
+    .gradio-container > .main,
+    .gradio-container > .main > .wrap {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
     }
     .header-wrap {
-        padding: 4px 4px 6px 4px;
+        padding: 8px 16px;
+        border-bottom: 1px solid #d1d5db;
+    }
+    .dark .header-wrap {
+        border-bottom-color: #374151;
     }
     .page-title {
-        font-size: 22px;
+        font-size: 20px;
         font-weight: 700;
-        line-height: 1.1;
+        line-height: 1.15;
     }
     .page-meta {
-        color: #666;
-        margin-top: 2px;
-        font-size: 13px;
+        color: #888;
+        font-size: 12px;
     }
     #main-row {
-        height: calc(100vh - 66px);
-        gap: 10px;
-    }
-    #left-panel, #right-panel {
-        height: 100%;
+        flex: 1 1 auto !important;
+        min-height: 0 !important;
+        flex-wrap: nowrap !important;
+        align-items: stretch !important;
+        padding: 6px 18px 10px 18px !important;
+        gap: 18px !important;
+        overflow: hidden !important;
     }
     #left-panel {
-        display: flex;
-        flex-direction: column;
-        border: 1.5px solid #d0d0d0;
-        border-radius: 18px 18px 18px 18px;
-        background: #18181a;
-        box-shadow: 0 2px 12px 0 rgba(0,0,0,0.08);
-        padding: 10px 8px 16px 8px;
-        overflow: hidden;
-        position: relative;
+        height: 100% !important;
+        min-height: 0 !important;
+        border-right: 2px solid #d1d5db !important;
+        padding-right: 18px !important;
+        display: flex !important;
+        flex-direction: column !important;
+        overflow: hidden !important;
     }
-    #left-panel:after {
-        content: "";
-        display: block;
-        position: absolute;
-        left: 0; right: 0; bottom: 0;
-        height: 16px;
-        background: #18181a;
-        border-radius: 0 0 18px 18px;
-        box-shadow: 0 2px 8px 0 rgba(0,0,0,0.10);
-        z-index: 2;
-    }
-    #history-list {
-        flex: 1 1 auto;
-        min-height: 0;
-        overflow-y: auto;
-        border: 1px solid #23232a;
-        border-radius: 12px;
-        background: #23232a;
-        padding: 8px;
-        margin-bottom: 8px;
-        box-shadow: 0 1px 4px 0 rgba(0,0,0,0.06);
-    }
-    #new-chat-btn {
-        flex: 0 0 auto;
+    .dark #left-panel {
+        border-right-color: #4b5563 !important;
     }
     #right-panel {
+        height: 100% !important;
+        display: flex !important;
+        flex-direction: column !important;
+        justify-content: flex-end !important;
+        min-width: 0 !important;
+        min-height: 0 !important;
+        padding: 0 0 0 4px !important;
+        overflow: hidden !important;
+    }
+    #history-list {
+        flex: 1 1 auto !important;
+        min-height: 0 !important;
+        overflow-y: auto !important;
+        margin-bottom: 10px !important;
+    }
+    .history-list-wrap {
         display: flex;
         flex-direction: column;
-        gap: 6px;
+        gap: 8px;
+        padding-right: 4px;
     }
-    #chat-window {
-        flex: 1 1 auto;
-        min-height: 0;
-        border: 1px solid #23232a;
-        border-radius: 12px;
-        background: #19191b;
+    .history-item {
+        position: relative;
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 8px;
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.02);
+        transition: background 0.2s ease, border-color 0.2s ease;
     }
-    #input-row {
-        display: flex;
-        flex-direction: row;
-        align-items: flex-end;
-        gap: 6px;
-        margin-top: 2px;
+    .history-item.active {
+        border-color: rgba(96, 165, 250, 0.55);
+        background: rgba(96, 165, 250, 0.08);
     }
-    #input-box {
-        flex: 1 1 auto;
-        margin-top: 0;
-        border-radius: 8px;
-        background: #23232a;
-        color: #eaeaea;
+    .history-main {
+        border: 0;
+        background: transparent;
+        text-align: left;
+        padding: 12px 10px 12px 14px;
+        color: inherit;
+        cursor: pointer;
+        width: 100%;
     }
-    #send-btn {
-        min-width: 44px;
-        min-height: 44px;
-        padding: 0;
-        background: #2d8cf0;
-        border-radius: 50%;
+    .history-title-row {
         display: flex;
         align-items: center;
-        justify-content: center;
-        box-shadow: 0 2px 8px 0 rgba(45,140,240,0.10);
-        margin-left: 2px;
+        gap: 8px;
+        margin-bottom: 4px;
     }
-    #send-btn .send-icon {
-        display: block;
-        margin: 0 auto;
-        fill: #fff;
+    .history-title {
+        font-size: 14px;
+        font-weight: 600;
+        line-height: 1.3;
+        word-break: break-word;
     }
-    #actions-row {
-        flex: 0 0 auto;
-        margin-top: 2px;
+    .history-pin {
+        font-size: 11px;
+        color: #f59e0b;
+        border: 1px solid rgba(245, 158, 11, 0.35);
+        border-radius: 999px;
+        padding: 1px 6px;
+        flex-shrink: 0;
+    }
+    .history-time {
+        font-size: 12px;
+        color: #94a3b8;
+    }
+    .history-menu-wrap {
+        position: relative;
+        padding: 8px 8px 0 0;
+    }
+    .history-menu-btn {
+        border: 0;
+        background: transparent;
+        color: #94a3b8;
+        font-size: 16px;
+        line-height: 1;
+        padding: 8px;
+        cursor: pointer;
+        border-radius: 10px;
+    }
+    .history-menu-btn:hover {
+        background: rgba(148, 163, 184, 0.1);
+    }
+    .history-menu {
+        display: none;
+        position: absolute;
+        right: 0;
+        top: 38px;
+        min-width: 120px;
+        padding: 6px;
+        border-radius: 12px;
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        background: #15161a;
+        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+        z-index: 40;
+    }
+    .history-menu.open {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+    }
+    .history-menu button {
+        border: 0;
+        background: transparent;
+        color: #e5e7eb;
+        text-align: left;
+        padding: 8px 10px;
+        border-radius: 8px;
+        cursor: pointer;
+    }
+    .history-menu button:hover {
+        background: rgba(148, 163, 184, 0.1);
+    }
+    .history-menu button.danger {
+        color: #fca5a5;
+    }
+    #chat-window {
+        flex: 1 1 0 !important;
+        height: 100% !important;
+        max-height: none !important;
+        min-height: 0 !important;
+        overflow-y: auto !important;
+        border-radius: 8px !important;
+        border: 1px solid #374151 !important;
+        margin-top: 0 !important;
+    }
+    #input-wrap {
+        margin-top: 6px !important;
+        flex: 0 0 auto !important;
+        position: relative !important;
+        display: block !important;
+    }
+    #input-box {
+        width: 100% !important;
+    }
+    #input-box textarea {
+        min-height: 96px !important;
+        padding-right: 100px !important;
+        padding-bottom: 12px !important;
+    }
+    #send-btn {
+        position: absolute !important;
+        right: 10px !important;
+        bottom: 10px !important;
+        z-index: 10 !important;
+    }
+    #send-btn button {
+        min-height: 34px !important;
+        height: 34px !important;
+        padding: 0 14px !important;
+        white-space: nowrap !important;
+    }
+    .bridge-hidden {
+        display: none !important;
+    }
+    footer, .footer, .gradio-container .built-with {
+        display: none !important;
     }
     .ai-thought {
-        color: #888;
+        color: #9ca3af;
         font-size: 13px;
-        margin-bottom: 6px;
-        white-space: pre-wrap;
+        margin-bottom: 10px;
+        white-space: normal;
+        border-left: 2px solid #4b5563;
+        padding-left: 10px;
     }
-    .ai-answer {
-        color: var(--body-text-color, #eaeaea);
-        font-size: 15px;
-        white-space: pre-wrap;
+    .ai-thinking {
+        color: #9ca3af;
+        font-size: 14px;
+        letter-spacing: 0.02em;
     }
     """)
 

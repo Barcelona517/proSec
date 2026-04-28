@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import re
 
 from config import HISTORY_FILE, MAX_TURNS, MODEL_NAME, SYSTEM_PROMPT, WORKSPACE_ROOT
 from llm_client import build_client
@@ -24,13 +25,73 @@ def save_history(path: Path, messages: list[dict]) -> None:
     path.write_text(json.dumps(messages, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _looks_like_brief_topic_query(user_input: str) -> bool:
+    text = user_input.strip()
+    if not text or "\n" in text or len(text) > 24:
+        return False
+
+    lowered = text.lower()
+    action_words = [
+        "请", "帮我", "给我", "解释", "介绍", "搜索", "查", "看看", "打开", "读取", "写入",
+        "删除", "存在", "还在", "目录", "文件",
+        "please", "search", "find", "open", "read", "write", "delete", "exists", "file",
+    ]
+    if any(word in lowered for word in action_words):
+        return False
+
+    if any(ch in text for ch in "，。！？；：,.!?;:/\\()[]{}<>\"'`"):
+        return False
+
+    tokens = re.split(r"\s+", text)
+    return len(tokens) <= 4
+
+
+def _looks_like_fresh_file_check(user_input: str) -> bool:
+    text = user_input.strip().lower()
+    hints = [
+        "文件", "目录", "文件夹", "还在", "存在", "删", "删除", "现在有", "当前有", "实时",
+        "file", "folder", "directory", "exists", "exist", "deleted", "remove", "removed", "current",
+    ]
+    return any(hint in text for hint in hints)
+
+
+def _build_messages(user_input: str, history: list[dict]) -> list[dict]:
+    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}] + history
+
+    if _looks_like_brief_topic_query(user_input):
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "用户这次只输入了一个简短名词或短语。"
+                    "默认将其理解为：用户想了解这个对象的相关信息、背景、用途、特点或来源。"
+                    "如果需要外部知识，优先调用 search_web；回答时直接给出简介和关键信息。"
+                ),
+            }
+        )
+
+    if _looks_like_fresh_file_check(user_input):
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "这次问题涉及文件或目录的当前状态。"
+                    "你必须重新调用本地文件工具做实时检查，不能直接引用旧对话里之前看到的文件列表或旧结论。"
+                ),
+            }
+        )
+
+    messages.append({"role": "user", "content": user_input})
+    return messages
+
+
 def run_agent(user_input: str, history: list[dict]) -> tuple[str, list[dict]]:
     client = build_client()
     tools = ToolRegistry(WORKSPACE_ROOT)
-
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history + [{"role": "user", "content": user_input}]
+    messages = _build_messages(user_input, history)
 
     final_answer = "未获得最终回答。"
+    last_tool_error = ""
 
     for turn in range(1, MAX_TURNS + 1):
         print(f"\n=== Turn {turn} ===")
@@ -43,11 +104,7 @@ def run_agent(user_input: str, history: list[dict]) -> tuple[str, list[dict]]:
         )
 
         msg = resp.choices[0].message
-        assistant_message = {
-            "role": "assistant",
-            "content": msg.content or "",
-        }
-
+        assistant_message = {"role": "assistant", "content": msg.content or ""}
         if msg.tool_calls:
             assistant_message["tool_calls"] = [tc.model_dump() for tc in msg.tool_calls]
         messages.append(assistant_message)
@@ -65,19 +122,24 @@ def run_agent(user_input: str, history: list[dict]) -> tuple[str, list[dict]]:
             print(f"Action: {tool_name}({raw_args})")
             try:
                 tool_result = tools.execute(tool_name, raw_args)
+                parsed = json.loads(tool_result)
+                if isinstance(parsed, dict) and parsed.get("ok") is False:
+                    last_tool_error = str(parsed.get("error", "")).strip()
             except ToolExecutionError as exc:
                 tool_result = json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
+                last_tool_error = str(exc)
             except Exception as exc:  # noqa: BLE001
                 tool_result = json.dumps({"ok": False, "error": f"工具执行异常: {exc}"}, ensure_ascii=False)
+                last_tool_error = f"工具执行异常: {exc}"
 
             print(f"Observation: {tool_result}")
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": tool_result,
-                }
-            )
+            messages.append({"role": "tool", "tool_call_id": tc.id, "content": tool_result})
+
+    if final_answer == "未获得最终回答。":
+        if last_tool_error:
+            final_answer = f"这次没有成功拿到结果，最后一次工具报错是：{last_tool_error}"
+        else:
+            final_answer = f"这次没有成功拿到最终回答，可能是达到最大轮数 {MAX_TURNS} 仍未结束。"
 
     new_history = [m for m in messages if m["role"] != "system"]
     return final_answer, new_history

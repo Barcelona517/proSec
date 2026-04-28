@@ -1,0 +1,422 @@
+[
+  {
+    "type": "Text",
+    "name": "?????",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      2296,
+      862,
+      2364,
+      897
+    ]
+  },
+  {
+    "type": "Group",
+    "name": "❅ ◎.◎ ❅",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      2400,
+      966,
+      2464,
+      1030
+    ]
+  },
+  {
+    "type": "Group",
+    "name": "",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      2148,
+      966,
+      2384,
+      1042
+    ]
+  },
+  {
+    "type": "Text",
+    "name": "????ai??????TD",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      2168,
+      986,
+      2364,
+      1021
+    ]
+  },
+  {
+    "type": "Group",
+    "name": "❅ ◎.◎ ❅",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      2400,
+      1090,
+      2464,
+      1154
+    ]
+  },
+  {
+    "type": "Group",
+    "name": "",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      2041,
+      1090,
+      2384,
+      1166
+    ]
+  },
+  {
+    "type": "Text",
+    "name": "何意味我让ai测试发消息",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      2061,
+      1110,
+      2364,
+      1145
+    ]
+  },
+  {
+    "type": "Group",
+    "name": "❅ ◎.◎ ❅",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      2400,
+      1214,
+      2464,
+      1278
+    ]
+  },
+  {
+    "type": "Group",
+    "name": "",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      2148,
+      1214,
+      2384,
+      1290
+    ]
+  },
+  {
+    "type": "Text",
+    "name": "它又给我发乱码",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      2168,
+      1234,
+      2364,
+      1269
+    ]
+  },
+  {
+    "type": "ToolBar",
+    "name": "会话",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      500,
+      1322,
+      2504,
+      1403
+    ]
+  },
+  {
+    "type": "Button",
+    "name": "表情",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      532,
+      1338,
+      596,
+      1403
+    ]
+  },
+  {
+    "type": "Image",
+    "name": "",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      544,
+      1350,
+      584,
+      1391
+    ]
+  },
+  {
+    "type": "Button",
+    "name": "截图 Shift + ↑",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      604,
+      1338,
+      652,
+      1403
+    ]
+  },
+  {
+    "type": "Image",
+    "name": "",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      608,
+      1350,
+      648,
+      1391
+    ]
+  },
+  {
+    "type": "Button",
+    "name": "截图 Shift + ↑弹出菜单",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      636,
+      1334,
+      660,
+      1399
+    ]
+  },
+  {
+    "type": "Image",
+    "name": "",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      648,
+      1354,
+      680,
+      1387
+    ]
+  },
+  {
+    "type": "Button",
+    "name": "文件",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      684,
+      1338,
+      732,
+      1403
+    ]
+  },
+  {
+    "type": "Image",
+    "name": "",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      688,
+      1350,
+      728,
+      1391
+    ]
+  },
+  {
+    "type": "Button",
+    "name": "文件弹出菜单",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      716,
+      1334,
+      740,
+      1399
+    ]
+  },
+  {
+    "type": "Image",
+    "name": "",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      728,
+      1354,
+      760,
+      1387
+    ]
+  },
+  {
+    "type": "Button",
+    "name": "图片",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      764,
+      1338,
+      828,
+      1403
+    ]
+  },
+  {
+    "type": "Image",
+    "name": "",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      776,
+      1350,
+      816,
+      1391
+    ]
+  },
+  {
+    "type": "Button",
+    "name": "窗口抖动",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      836,
+      1338,
+      900,
+      1403
+    ]
+  },
+  {
+    "type": "Image",
+    "name": "",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      848,
+      1350,
+      888,
+      1391
+    ]
+  },
+  {
+    "type": "Button",
+    "name": "红包",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      908,
+      1338,
+      972,
+      1403
+    ]
+  },
+  {
+    "type": "Image",
+    "name": "",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      920,
+      1350,
+      960,
+      1391
+    ]
+  },
+  {
+    "type": "Button",
+    "name": "语音消息",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      980,
+      1338,
+      1044,
+      1403
+    ]
+  },
+  {
+    "type": "Image",
+    "name": "",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      992,
+      1350,
+      1032,
+      1391
+    ]
+  },
+  {
+    "type": "Button",
+    "name": "聊天记录",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      2408,
+      1338,
+      2472,
+      1403
+    ]
+  },
+  {
+    "type": "Image",
+    "name": "",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      2420,
+      1350,
+      2460,
+      1391
+    ]
+  },
+  {
+    "type": "Group",
+    "name": "好望角 03.04",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      500,
+      1403,
+      2504,
+      1625
+    ]
+  },
+  {
+    "type": "Button",
+    "name": "关闭",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      2104,
+      1648,
+      2260,
+      1712
+    ]
+  },
+  {
+    "type": "Button",
+    "name": "发送",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      2308,
+      1652,
+      2364,
+      1708
+    ]
+  },
+  {
+    "type": "Image",
+    "name": "",
+    "auto_id": "",
+    "class_name": "",
+    "rect": [
+      2414,
+      1666,
+      2442,
+      1694
+    ]
+  }
+]

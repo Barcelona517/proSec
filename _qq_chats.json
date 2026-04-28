@@ -1,0 +1,175 @@
+{
+  "attach": {
+    "ok": true,
+    "window_title": "啥时候去（待…等4个会话",
+    "backend": "uia",
+    "launched": false
+  },
+  "chats": [
+    {
+      "name": "啥时候去（待定）？！",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "李文宇：",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "@想吃西瓜的喵头鹰",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "这下看懂了",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "2025级糖宝宝 计算机技术与科学",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "计算机 庞绍旗撤回了一条消息,并坏笑了一下：",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "[动画表情]",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "包身工",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "可以罢免皇帝🤴的霍光：",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "[图片]",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "好望角 03.04",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "它又给我发乱码",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "(7)",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "想吃西瓜的喵头鹰",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "LV",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "王者",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "他说去参加日麻比赛",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "再抽就是狗",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "go学长今天一大早就飞去东京了",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "啊？",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "奶奶的我也想去日本",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "❅ ◎.◎ ❅",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "群主",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "真的假的",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "真的",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "人已经消失了",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "他平时也不怎么上课的",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "总是去打他那个wota艺",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "傻软二次元",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "我也想要这种说走就走的生活",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "其实学校管得宽松一点就能做到",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "自己策划总要想好多",
+      "control_type": "Text",
+      "automation_id": ""
+    },
+    {
+      "name": "李文宇",
+      "control_type": "Text",
+      "automation_id": ""
+    }
+  ]
+}
