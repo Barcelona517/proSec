@@ -12,8 +12,9 @@ from uuid import uuid4
 
 import gradio as gr
 
-from config import HISTORY_FILE, MODEL_NAME, WORKSPACE_ROOT
+from config import HISTORY_FILE, MODEL_NAME, VISION_MODEL, WORKSPACE_ROOT
 from main import load_history, run_agent, save_history
+from vision_agent import run_vision_agent
 
 
 os.environ["no_proxy"] = "localhost,127.0.0.1"
@@ -166,10 +167,11 @@ def _history_to_chat_messages(agent_history: list[dict]) -> list[dict[str, str]]
 
 def _submit_message(
     user_message: str,
+    image_path: str | None,
     chat_messages: list[dict[str, str]] | None,
     conversations: list[dict] | None,
     current_conv_id: str,
-) -> tuple[list[dict[str, str]], list[dict], str, str, str]:
+) -> tuple[list[dict[str, str]], list[dict], str, str, str | None, str | None, str]:
     user_message = (user_message or "").strip()
     convs = [_normalize_conversation(c) for c in list(conversations or [])]
     if not convs:
@@ -178,23 +180,34 @@ def _submit_message(
     current_conv = _find_conversation(convs, current_conv_id)
     agent_history = list(current_conv.get("messages", []))
 
-    if not user_message:
+    if not user_message and not image_path:
         return (
             chat_messages or _history_to_chat_messages(agent_history),
             convs,
             current_conv_id,
             "",
+            None,
+            None,
             _render_history_sidebar(convs, current_conv_id),
         )
 
     ui_messages = list(chat_messages or [])
     try:
-        buf = io.StringIO()
-        with redirect_stdout(buf):
-            answer, new_agent_history = run_agent(user_message, agent_history)
-        logs = buf.getvalue().splitlines()
-        thoughts = [line.split("Thought/Reply:", 1)[1].strip() for line in logs if "Thought/Reply:" in line]
-        thought_text = "\n".join([t for t in thoughts if t])
+        thought_text = ""
+        if image_path:
+            prompt = user_message or "请识别并分析这张图片。"
+            answer = run_vision_agent(prompt, image_path)
+            new_agent_history = list(agent_history) + [
+                {"role": "user", "content": f"{prompt}\n[图片] {image_path}"},
+                {"role": "assistant", "content": answer},
+            ]
+        else:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                answer, new_agent_history = run_agent(user_message, agent_history)
+            logs = buf.getvalue().splitlines()
+            thoughts = [line.split("Thought/Reply:", 1)[1].strip() for line in logs if "Thought/Reply:" in line]
+            thought_text = "\n".join([t for t in thoughts if t])
 
         current_conv["messages"] = new_agent_history
         if current_conv.get("title") in {"", "新对话"} or len(agent_history) == 0:
@@ -202,17 +215,24 @@ def _submit_message(
         current_conv["updated_at"] = _now_iso()
         _persist_conversations(convs, current_conv_id)
 
-        ui_messages.append({"role": "user", "content": user_message})
+        user_display = user_message or "请识别并分析这张图片。"
+        if image_path:
+            user_display = f"{user_display}\n[已上传图片]"
+        ui_messages.append({"role": "user", "content": user_display})
         ui_messages.append({"role": "assistant", "content": _format_assistant_content(thought_text, answer)})
-        return ui_messages, convs, current_conv_id, "", _render_history_sidebar(convs, current_conv_id)
+        return ui_messages, convs, current_conv_id, "", None, None, _render_history_sidebar(convs, current_conv_id)
     except Exception as exc:  # noqa: BLE001
-        ui_messages.append({"role": "user", "content": user_message})
+        user_display = user_message or "请识别并分析这张图片。"
+        if image_path:
+            user_display = f"{user_display}\n[已上传图片]"
+        ui_messages.append({"role": "user", "content": user_display})
         ui_messages.append({"role": "assistant", "content": _format_assistant_content("", f"Agent Error: {exc}")})
-        return ui_messages, convs, current_conv_id, "", _render_history_sidebar(convs, current_conv_id)
+        return ui_messages, convs, current_conv_id, "", None, None, _render_history_sidebar(convs, current_conv_id)
 
 
 def _submit_message_stream(
     user_message: str,
+    image_path: str | None,
     chat_messages: list[dict[str, str]] | None,
     conversations: list[dict] | None,
     current_conv_id: str,
@@ -224,40 +244,27 @@ def _submit_message_stream(
 
     current_conv = _find_conversation(convs, current_conv_id)
     agent_history = list(current_conv.get("messages", []))
-    if not user_message:
+    if not user_message and not image_path:
         yield (
             chat_messages or _history_to_chat_messages(agent_history),
             convs,
             current_conv_id,
             "",
+            None,
+            None,
             _render_history_sidebar(convs, current_conv_id),
         )
         return
 
     thinking_messages = list(chat_messages or [])
-    thinking_messages.append({"role": "user", "content": user_message})
+    user_display = user_message or "请识别并分析这张图片。"
+    if image_path:
+        user_display = f"{user_display}\n[已上传图片]"
+    thinking_messages.append({"role": "user", "content": user_display})
     thinking_messages.append({"role": "assistant", "content": "<div class='ai-thinking'>思考中...</div>"})
-    yield thinking_messages, convs, current_conv_id, user_message, _render_history_sidebar(convs, current_conv_id)
+    yield thinking_messages, convs, current_conv_id, user_message, image_path, image_path, _render_history_sidebar(convs, current_conv_id)
 
-    yield _submit_message(user_message, chat_messages, convs, current_conv_id)
-
-
-def _select_conversation(conv_id: str, conversations: list[dict]) -> tuple[list[dict[str, str]], str, str]:
-    convs = [_normalize_conversation(c) for c in list(conversations or [])]
-    if not convs:
-        convs, conv_id = _load_or_init_conversations()
-    selected = _find_conversation(convs, conv_id)
-    save_history(HISTORY_FILE, selected.get("messages", []))
-    return _history_to_chat_messages(selected.get("messages", [])), str(selected.get("id")), _render_history_sidebar(convs, str(selected.get("id")))
-
-
-def _new_chat(conversations: list[dict]) -> tuple[str, list[dict], str, list[dict[str, str]], str]:
-    convs = [_normalize_conversation(c) for c in list(conversations or [])]
-    conv = _new_conversation([])
-    convs.append(conv)
-    active_id = conv["id"]
-    _persist_conversations(convs, active_id)
-    return _render_history_sidebar(convs, active_id), convs, active_id, [], ""
+    yield _submit_message(user_message, image_path, chat_messages, convs, current_conv_id)
 
 
 def _handle_history_action(
@@ -282,10 +289,10 @@ def _handle_history_action(
         return _render_history_sidebar(convs, active_id), convs, active_id, _history_to_chat_messages(selected.get("messages", [])), ""
 
     if not target_id:
-        return _render_history_sidebar(convs, current_conv_id), convs, current_conv_id, _history_to_chat_messages(_find_conversation(convs, current_conv_id).get("messages", [])), ""
+        active = _find_conversation(convs, current_conv_id)
+        return _render_history_sidebar(convs, current_conv_id), convs, current_conv_id, _history_to_chat_messages(active.get("messages", [])), ""
 
     conv = _find_conversation(convs, target_id)
-
     if action == "rename":
         new_title = payload[:40].strip()
         if new_title:
@@ -306,13 +313,16 @@ def _handle_history_action(
         _persist_conversations(convs, current_conv_id)
 
     active = _find_conversation(convs, current_conv_id)
-    return (
-        _render_history_sidebar(convs, current_conv_id),
-        convs,
-        current_conv_id,
-        _history_to_chat_messages(active.get("messages", [])),
-        "",
-    )
+    return _render_history_sidebar(convs, current_conv_id), convs, current_conv_id, _history_to_chat_messages(active.get("messages", [])), ""
+
+
+def _new_chat(conversations: list[dict]) -> tuple[str, list[dict], str, list[dict[str, str]], str]:
+    convs = [_normalize_conversation(c) for c in list(conversations or [])]
+    conv = _new_conversation([])
+    convs.append(conv)
+    active_id = conv["id"]
+    _persist_conversations(convs, active_id)
+    return _render_history_sidebar(convs, active_id), convs, active_id, [], ""
 
 
 def _build_client_script() -> str:
@@ -370,6 +380,15 @@ def _build_client_script() -> str:
       document.addEventListener("click", (event) => {
         if (!event.target.closest(".history-menu-wrap")) {
           document.querySelectorAll(".history-menu.open").forEach((menu) => menu.classList.remove("open"));
+        }
+      });
+
+      document.addEventListener("click", (event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLElement)) return;
+        if (target.closest("#add-image-btn")) {
+          const fileInput = document.querySelector("#image-box input[type='file']");
+          if (fileInput instanceof HTMLElement) fileInput.click();
         }
       });
 
@@ -444,8 +463,10 @@ def build_demo() -> gr.Blocks:
             """
             <div class="header-wrap">
               <div class="page-title">pre OpenClaw</div>
-              <div class="page-meta">模型: """
+              <div class="page-meta">文本模型: """
             + escape(MODEL_NAME)
+            + """ | 视觉模型: """
+            + escape(VISION_MODEL)
             + """ | 工作目录: """
             + escape(str(WORKSPACE_ROOT))
             + """</div>
@@ -460,25 +481,29 @@ def build_demo() -> gr.Blocks:
                 new_chat_btn = gr.Button("+ 新建对话", elem_id="new-chat-btn")
 
             with gr.Column(scale=9, elem_id="right-panel"):
-                chatbot = gr.Chatbot(
-                    value=initial_chat_messages,
-                    buttons=["copy"],
-                    layout="bubble",
-                    height="100%",
-                    sanitize_html=False,
-                    render_markdown=True,
-                    latex_delimiters=[
-                        {"left": "$$", "right": "$$", "display": True},
-                        {"left": "$", "right": "$", "display": False},
-                        {"left": "\\(", "right": "\\)", "display": False},
-                        {"left": "\\[", "right": "\\]", "display": True},
-                    ],
-                    elem_id="chat-window",
-                )
+                with gr.Column(elem_id="chat-area"):
+                    chatbot = gr.Chatbot(
+                        value=initial_chat_messages,
+                        buttons=["copy"],
+                        layout="bubble",
+                        height="100%",
+                        sanitize_html=False,
+                        render_markdown=True,
+                        latex_delimiters=[
+                            {"left": "$$", "right": "$$", "display": True},
+                            {"left": "$", "right": "$", "display": False},
+                            {"left": "\\(", "right": "\\)", "display": False},
+                            {"left": "\\[", "right": "\\]", "display": True},
+                        ],
+                        elem_id="chat-window",
+                    )
+                image_box = gr.Image(type="filepath", label="图片", elem_id="image-box", elem_classes="image-picker")
+                image_preview = gr.Image(type="filepath", label=None, show_label=False, interactive=False, elem_id="image-preview")
                 with gr.Row(elem_id="input-wrap"):
+                    add_image_btn = gr.Button("+", elem_id="add-image-btn", scale=0)
                     message_box = gr.Textbox(
                         label="输入",
-                        placeholder="Enter 发送，Shift+Enter 换行",
+                        placeholder="Enter 发送，Shift+Enter 换行；上传图片后可直接问图中内容",
                         lines=4,
                         elem_id="input-box",
                         show_label=False,
@@ -486,7 +511,7 @@ def build_demo() -> gr.Blocks:
                         max_lines=12,
                         autofocus=True,
                     )
-                    send_btn = gr.Button("发送", elem_id="send-btn", variant="primary", scale=0)
+                    send_btn = gr.Button("↑", elem_id="send-btn", variant="primary", scale=0)
 
         conversations_state = gr.State(conversations)
         current_conv_id_state = gr.State(active_id)
@@ -498,8 +523,13 @@ def build_demo() -> gr.Blocks:
 
         send_btn.click(
             fn=_submit_message_stream,
-            inputs=[message_box, chatbot, conversations_state, current_conv_id_state],
-            outputs=[chatbot, conversations_state, current_conv_id_state, message_box, history_html],
+            inputs=[message_box, image_box, chatbot, conversations_state, current_conv_id_state],
+            outputs=[chatbot, conversations_state, current_conv_id_state, message_box, image_box, image_preview, history_html],
+        )
+        image_box.change(
+            fn=lambda path: path,
+            inputs=[image_box],
+            outputs=[image_preview],
         )
         new_chat_btn.click(
             fn=_new_chat,
@@ -577,6 +607,8 @@ def main() -> None:
     }
     #main-row {
         flex: 1 1 auto !important;
+        height: calc(100vh - 96px) !important;
+        max-height: calc(100vh - 96px) !important;
         min-height: 0 !important;
         flex-wrap: nowrap !important;
         align-items: stretch !important;
@@ -586,6 +618,7 @@ def main() -> None:
     }
     #left-panel {
         height: 100% !important;
+        max-height: 100% !important;
         min-height: 0 !important;
         border-right: 2px solid #d1d5db !important;
         padding-right: 18px !important;
@@ -598,12 +631,19 @@ def main() -> None:
     }
     #right-panel {
         height: 100% !important;
-        display: flex !important;
-        flex-direction: column !important;
-        justify-content: flex-end !important;
+        max-height: 100% !important;
+        display: grid !important;
+        grid-template-rows: minmax(0, 1fr) auto auto !important;
         min-width: 0 !important;
         min-height: 0 !important;
         padding: 0 0 0 4px !important;
+        overflow: hidden !important;
+    }
+    #chat-area {
+        min-height: 0 !important;
+        height: 100% !important;
+        display: flex !important;
+        flex-direction: column !important;
         overflow: hidden !important;
     }
     #history-list {
@@ -725,6 +765,41 @@ def main() -> None:
         border: 1px solid #374151 !important;
         margin-top: 0 !important;
     }
+    #image-box.image-picker {
+        position: absolute !important;
+        width: 0 !important;
+        height: 0 !important;
+        overflow: hidden !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
+    }
+    #image-preview {
+        width: 88px !important;
+        min-width: 88px !important;
+        margin: 4px 0 8px 0 !important;
+        border-radius: 12px !important;
+        overflow: hidden !important;
+        border: 1px solid rgba(148, 163, 184, 0.25) !important;
+    }
+    #image-preview img {
+        object-fit: cover !important;
+        max-height: 88px !important;
+    }
+    #add-image-btn {
+        position: absolute !important;
+        right: 56px !important;
+        bottom: 10px !important;
+        z-index: 11 !important;
+    }
+    #add-image-btn button {
+        min-width: 34px !important;
+        width: 34px !important;
+        height: 34px !important;
+        padding: 0 !important;
+        border-radius: 999px !important;
+        font-size: 18px !important;
+        line-height: 1 !important;
+    }
     #input-wrap {
         margin-top: 6px !important;
         flex: 0 0 auto !important;
@@ -736,7 +811,8 @@ def main() -> None:
     }
     #input-box textarea {
         min-height: 96px !important;
-        padding-right: 100px !important;
+        padding-left: 14px !important;
+        padding-right: 98px !important;
         padding-bottom: 12px !important;
     }
     #send-btn {
@@ -746,10 +822,15 @@ def main() -> None:
         z-index: 10 !important;
     }
     #send-btn button {
+        min-width: 34px !important;
+        width: 34px !important;
         min-height: 34px !important;
         height: 34px !important;
-        padding: 0 14px !important;
+        padding: 0 !important;
+        border-radius: 999px !important;
         white-space: nowrap !important;
+        font-size: 18px !important;
+        line-height: 1 !important;
     }
     .bridge-hidden {
         display: none !important;

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 import json
@@ -40,6 +41,43 @@ class ToolRegistry:
         self._register_builtin_tools()
 
     def _register_builtin_tools(self) -> None:
+        self.register(
+            Tool(
+                name="get_current_time",
+                description="Get the current local time, or the current time for a specific UTC offset.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "utc_offset": {
+                            "type": "string",
+                            "description": "Optional UTC offset like +08:00 or -05:00.",
+                        }
+                    },
+                    "additionalProperties": False,
+                },
+                handler=self._get_current_time,
+            )
+        )
+
+        self.register(
+            Tool(
+                name="get_weather",
+                description="Get the current weather and a short forecast for a location.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "location": {
+                            "type": "string",
+                            "description": "The city or place name to query weather for.",
+                        }
+                    },
+                    "required": ["location"],
+                    "additionalProperties": False,
+                },
+                handler=self._get_weather,
+            )
+        )
+
         self.register(
             Tool(
                 name="preview_qq_send_target",
@@ -422,6 +460,52 @@ class ToolRegistry:
 
         return json.dumps({"path": str(path), "mode": mode, "written_chars": len(content)}, ensure_ascii=False)
 
+    def _get_current_time(self, args: dict[str, Any]) -> str:
+        utc_offset = str(args.get("utc_offset", "") or "").strip()
+        if utc_offset:
+            tz = self._parse_utc_offset(utc_offset)
+            now = datetime.now(tz)
+            return json.dumps(
+                {
+                    "timezone_mode": "utc_offset",
+                    "utc_offset": utc_offset,
+                    "iso": now.isoformat(timespec="seconds"),
+                    "date": now.strftime("%Y-%m-%d"),
+                    "time": now.strftime("%H:%M:%S"),
+                    "weekday": now.strftime("%A"),
+                },
+                ensure_ascii=False,
+            )
+
+        now = datetime.now().astimezone()
+        offset = now.strftime("%z")
+        normalized_offset = f"{offset[:3]}:{offset[3:]}" if offset else ""
+        return json.dumps(
+            {
+                "timezone_mode": "local",
+                "utc_offset": normalized_offset,
+                "iso": now.isoformat(timespec="seconds"),
+                "date": now.strftime("%Y-%m-%d"),
+                "time": now.strftime("%H:%M:%S"),
+                "weekday": now.strftime("%A"),
+            },
+            ensure_ascii=False,
+        )
+
+    def _parse_utc_offset(self, value: str) -> timezone:
+        match = __import__("re").fullmatch(r"([+-])(\d{2}):(\d{2})", value)
+        if not match:
+            raise ToolExecutionError("utc_offset 必须是类似 +08:00 或 -05:00 的格式。")
+        sign, hours_str, minutes_str = match.groups()
+        hours = int(hours_str)
+        minutes = int(minutes_str)
+        if hours > 23 or minutes > 59:
+            raise ToolExecutionError("utc_offset 超出有效范围。")
+        total_minutes = hours * 60 + minutes
+        if sign == "-":
+            total_minutes = -total_minutes
+        return timezone(timedelta(minutes=total_minutes))
+
     def _search_web(self, args: dict[str, Any]) -> str:
         query = str(args["query"]).strip()
         max_results = int(args.get("max_results", 5))
@@ -662,6 +746,133 @@ class ToolRegistry:
             raise ToolExecutionError(detail) from exc
         except urllib.error.URLError as exc:
             raise ToolExecutionError(f"{provider_label} request failed: {exc}") from exc
+
+    def _get_weather(self, args: dict[str, Any]) -> str:
+        location = str(args["location"]).strip()
+        if not location:
+            raise ToolExecutionError("location cannot be empty")
+
+        geocode_url = "https://geocoding-api.open-meteo.com/v1/search?" + urllib.parse.urlencode(
+            {
+                "name": location,
+                "count": 1,
+                "language": "zh",
+                "format": "json",
+            }
+        )
+        geocode_request = urllib.request.Request(
+            geocode_url,
+            headers={"User-Agent": "Mozilla/5.0"},
+            method="GET",
+        )
+        geocode_data = self._load_json_response(geocode_request, "Open-Meteo geocoding")
+        results = geocode_data.get("results") or []
+        if not results:
+            raise ToolExecutionError(f"没有找到地点 `{location}` 的天气位置。")
+
+        place = results[0]
+        latitude = place.get("latitude")
+        longitude = place.get("longitude")
+        if latitude is None or longitude is None:
+            raise ToolExecutionError("地理编码成功，但缺少经纬度信息。")
+
+        weather_url = "https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode(
+            {
+                "latitude": latitude,
+                "longitude": longitude,
+                "current": "temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,weather_code,wind_speed_10m",
+                "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+                "timezone": "auto",
+                "forecast_days": 3,
+            }
+        )
+        weather_request = urllib.request.Request(
+            weather_url,
+            headers={"User-Agent": "Mozilla/5.0"},
+            method="GET",
+        )
+        weather_data = self._load_json_response(weather_request, "Open-Meteo weather")
+
+        current = weather_data.get("current", {})
+        daily = weather_data.get("daily", {})
+        forecast: list[dict[str, Any]] = []
+        dates = daily.get("time") or []
+        codes = daily.get("weather_code") or []
+        tmax = daily.get("temperature_2m_max") or []
+        tmin = daily.get("temperature_2m_min") or []
+        rain = daily.get("precipitation_probability_max") or []
+        for i in range(min(3, len(dates))):
+            forecast.append(
+                {
+                    "date": dates[i],
+                    "weather": self._weather_code_to_text(codes[i] if i < len(codes) else None),
+                    "temp_max_c": tmax[i] if i < len(tmax) else None,
+                    "temp_min_c": tmin[i] if i < len(tmin) else None,
+                    "precipitation_probability_max": rain[i] if i < len(rain) else None,
+                }
+            )
+
+        return json.dumps(
+            {
+                "location_query": location,
+                "resolved_location": {
+                    "name": place.get("name", ""),
+                    "admin1": place.get("admin1", ""),
+                    "country": place.get("country", ""),
+                    "latitude": latitude,
+                    "longitude": longitude,
+                },
+                "current": {
+                    "time": current.get("time"),
+                    "temperature_c": current.get("temperature_2m"),
+                    "apparent_temperature_c": current.get("apparent_temperature"),
+                    "humidity_percent": current.get("relative_humidity_2m"),
+                    "wind_speed_kmh": current.get("wind_speed_10m"),
+                    "precipitation_mm": current.get("precipitation"),
+                    "weather": self._weather_code_to_text(current.get("weather_code")),
+                    "is_day": current.get("is_day"),
+                },
+                "forecast": forecast,
+                "provider": "open-meteo",
+            },
+            ensure_ascii=False,
+        )
+
+    def _weather_code_to_text(self, code: Any) -> str:
+        mapping = {
+            0: "晴",
+            1: "大体晴",
+            2: "局部多云",
+            3: "阴",
+            45: "雾",
+            48: "冻雾",
+            51: "小毛毛雨",
+            53: "毛毛雨",
+            55: "强毛毛雨",
+            56: "冻毛毛雨",
+            57: "强冻毛毛雨",
+            61: "小雨",
+            63: "中雨",
+            65: "大雨",
+            66: "冻雨",
+            67: "强冻雨",
+            71: "小雪",
+            73: "中雪",
+            75: "大雪",
+            77: "雪粒",
+            80: "小阵雨",
+            81: "阵雨",
+            82: "强阵雨",
+            85: "小阵雪",
+            86: "强阵雪",
+            95: "雷暴",
+            96: "雷暴伴小冰雹",
+            99: "雷暴伴强冰雹",
+        }
+        try:
+            return mapping.get(int(code), f"未知天气代码 {code}")
+        except Exception:
+            return "未知"
 
     def _qq(self) -> QQAutomation:
         return QQAutomation()
