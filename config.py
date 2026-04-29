@@ -9,7 +9,7 @@ load_dotenv(dotenv_path=BASE_DIR / ".env", override=False)
 
 WORKSPACE_ROOT = Path(os.getenv("AGENT_WORKSPACE_ROOT", BASE_DIR)).resolve()
 MODEL_NAME = os.getenv("MODEL_NAME", "deepseek-chat")
-VISION_MODEL = os.getenv("VISION_MODEL", "gpt-4.1-mini")
+VISION_MODEL = os.getenv("VISION_MODEL", "qwen3-vl-235b-a22b-thinking")
 MAX_TURNS = int(os.getenv("MAX_TURNS", "8"))
 HISTORY_FILE = Path(os.getenv("HISTORY_FILE", BASE_DIR / "chat_history.json"))
 PERSONA_FILE = Path(os.getenv("PERSONA_FILE", BASE_DIR / "persona.md"))

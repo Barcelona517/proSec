@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from contextlib import redirect_stdout
 from datetime import datetime
@@ -8,6 +8,7 @@ import json
 import os
 import re
 import socket
+import urllib.parse
 from uuid import uuid4
 
 import gradio as gr
@@ -35,7 +36,7 @@ def _make_title_from_messages(messages: list[dict]) -> str:
         if not content:
             continue
         cleaned = re.sub(r"[\r\n]+", " ", content)
-        cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.!?;:，。！？；：")
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.!?;:，。！；")
         return cleaned[:18] + ("..." if len(cleaned) > 18 else "")
     return "新对话"
 
@@ -149,6 +150,18 @@ def _format_assistant_content(thought: str, answer: str) -> str:
     return answer
 
 
+def _build_uploaded_image_html(image_path: str) -> str:
+    safe_path = urllib.parse.quote(image_path.replace("\\", "/"), safe="/:")
+    file_url = f"/gradio_api/file={safe_path}"
+    return (
+        "<div class='uploaded-image-card'>"
+        f"<a class='uploaded-image-link' href='{file_url}' target='_blank' rel='noopener noreferrer'>"
+        f"<img class='uploaded-image-thumb' src='{file_url}' alt='uploaded image' />"
+        "</a>"
+        "</div>"
+    )
+
+
 def _history_to_chat_messages(agent_history: list[dict]) -> list[dict[str, str]]:
     chat_messages: list[dict[str, str]] = []
     for item in agent_history:
@@ -187,7 +200,7 @@ def _submit_message(
             current_conv_id,
             "",
             None,
-            None,
+            gr.update(value=None, visible=False),
             _render_history_sidebar(convs, current_conv_id),
         )
 
@@ -217,17 +230,17 @@ def _submit_message(
 
         user_display = user_message or "请识别并分析这张图片。"
         if image_path:
-            user_display = f"{user_display}\n[已上传图片]"
+            user_display = f"{user_display}\n\n{_build_uploaded_image_html(image_path)}"
         ui_messages.append({"role": "user", "content": user_display})
         ui_messages.append({"role": "assistant", "content": _format_assistant_content(thought_text, answer)})
-        return ui_messages, convs, current_conv_id, "", None, None, _render_history_sidebar(convs, current_conv_id)
+        return ui_messages, convs, current_conv_id, "", None, gr.update(value=None, visible=False), _render_history_sidebar(convs, current_conv_id)
     except Exception as exc:  # noqa: BLE001
         user_display = user_message or "请识别并分析这张图片。"
         if image_path:
-            user_display = f"{user_display}\n[已上传图片]"
+            user_display = f"{user_display}\n\n{_build_uploaded_image_html(image_path)}"
         ui_messages.append({"role": "user", "content": user_display})
         ui_messages.append({"role": "assistant", "content": _format_assistant_content("", f"Agent Error: {exc}")})
-        return ui_messages, convs, current_conv_id, "", None, None, _render_history_sidebar(convs, current_conv_id)
+        return ui_messages, convs, current_conv_id, "", None, gr.update(value=None, visible=False), _render_history_sidebar(convs, current_conv_id)
 
 
 def _submit_message_stream(
@@ -251,7 +264,7 @@ def _submit_message_stream(
             current_conv_id,
             "",
             None,
-            None,
+            gr.update(value=None, visible=False),
             _render_history_sidebar(convs, current_conv_id),
         )
         return
@@ -262,7 +275,8 @@ def _submit_message_stream(
         user_display = f"{user_display}\n[已上传图片]"
     thinking_messages.append({"role": "user", "content": user_display})
     thinking_messages.append({"role": "assistant", "content": "<div class='ai-thinking'>思考中...</div>"})
-    yield thinking_messages, convs, current_conv_id, user_message, image_path, image_path, _render_history_sidebar(convs, current_conv_id)
+    preview_update = gr.update(value=image_path, visible=bool(image_path)) if image_path else gr.update(value=None, visible=False)
+    yield thinking_messages, convs, current_conv_id, user_message, image_path, preview_update, _render_history_sidebar(convs, current_conv_id)
 
     yield _submit_message(user_message, image_path, chat_messages, convs, current_conv_id)
 
@@ -383,6 +397,11 @@ def _build_client_script() -> str:
         }
       });
 
+      const triggerClearImage = () => {
+        const btn = document.querySelector("#clear-image-dispatch button") || document.querySelector("#clear-image-dispatch");
+        if (btn instanceof HTMLElement) btn.click();
+      };
+
       document.addEventListener("click", (event) => {
         const target = event.target;
         if (!(target instanceof HTMLElement)) return;
@@ -390,7 +409,38 @@ def _build_client_script() -> str:
           const fileInput = document.querySelector("#image-box input[type='file']");
           if (fileInput instanceof HTMLElement) fileInput.click();
         }
+        if (target.closest(".image-preview-remove")) {
+          triggerClearImage();
+        }
+        if (target.closest("#image-preview")) {
+          triggerClearImage();
+        }
       });
+
+      const bindDropUpload = () => {
+        const wrap = document.querySelector("#input-wrap");
+        const fileInput = document.querySelector("#image-box input[type='file']");
+        if (!(wrap instanceof HTMLElement) || !(fileInput instanceof HTMLInputElement)) return;
+        if (wrap.dataset.dropBound === "1") return;
+        wrap.dataset.dropBound = "1";
+
+        wrap.addEventListener("dragover", (event) => {
+          event.preventDefault();
+          wrap.classList.add("drag-over");
+        });
+        wrap.addEventListener("dragleave", () => {
+          wrap.classList.remove("drag-over");
+        });
+        wrap.addEventListener("drop", (event) => {
+          event.preventDefault();
+          wrap.classList.remove("drag-over");
+          const files = event.dataTransfer?.files;
+          if (!files || files.length === 0) return;
+          fileInput.files = files;
+          fileInput.dispatchEvent(new Event("change", { bubbles: true }));
+          fileInput.dispatchEvent(new Event("input", { bubbles: true }));
+        });
+      };
 
       const bindUi = () => {
         const chatRoot = document.querySelector("#chat-window");
@@ -398,6 +448,7 @@ def _build_client_script() -> str:
           window.setTimeout(bindUi, 100);
           return;
         }
+        bindDropUpload();
 
         if (!window.__enterBound) {
           window.__enterBound = true;
@@ -463,11 +514,7 @@ def build_demo() -> gr.Blocks:
             """
             <div class="header-wrap">
               <div class="page-title">pre OpenClaw</div>
-              <div class="page-meta">文本模型: """
-            + escape(MODEL_NAME)
-            + """ | 视觉模型: """
-            + escape(VISION_MODEL)
-            + """ | 工作目录: """
+              <div class="page-meta">工作目录: """
             + escape(str(WORKSPACE_ROOT))
             + """</div>
             </div>
@@ -498,12 +545,21 @@ def build_demo() -> gr.Blocks:
                         elem_id="chat-window",
                     )
                 image_box = gr.Image(type="filepath", label="图片", elem_id="image-box", elem_classes="image-picker")
-                image_preview = gr.Image(type="filepath", label=None, show_label=False, interactive=False, elem_id="image-preview")
+                with gr.Row(elem_id="preview-row"):
+                    image_preview = gr.Image(
+                        type="filepath",
+                        label=None,
+                        show_label=False,
+                        interactive=False,
+                        visible=False,
+                        elem_id="image-preview",
+                    )
+                    image_preview_remove = gr.HTML("", elem_id="image-preview-remove-wrap")
                 with gr.Row(elem_id="input-wrap"):
                     add_image_btn = gr.Button("+", elem_id="add-image-btn", scale=0)
                     message_box = gr.Textbox(
                         label="输入",
-                        placeholder="Enter 发送，Shift+Enter 换行；上传图片后可直接问图中内容",
+                        placeholder="给miniClaw发消息吧",
                         lines=4,
                         elem_id="input-box",
                         show_label=False,
@@ -520,6 +576,7 @@ def build_demo() -> gr.Blocks:
         history_target = gr.Textbox(value="", elem_id="history-target-box", elem_classes="bridge-hidden")
         history_payload = gr.Textbox(value="", elem_id="history-payload-box", elem_classes="bridge-hidden")
         history_dispatch = gr.Button("dispatch", elem_id="history-dispatch", elem_classes="bridge-hidden")
+        clear_image_btn = gr.Button("clear-image", elem_id="clear-image-dispatch", elem_classes="bridge-hidden")
 
         send_btn.click(
             fn=_submit_message_stream,
@@ -527,9 +584,20 @@ def build_demo() -> gr.Blocks:
             outputs=[chatbot, conversations_state, current_conv_id_state, message_box, image_box, image_preview, history_html],
         )
         image_box.change(
-            fn=lambda path: path,
+            fn=lambda path: (
+                gr.update(value=path, visible=bool(path)),
+                "<div class='image-preview-remove'>×</div>" if path else "",
+            ),
             inputs=[image_box],
-            outputs=[image_preview],
+            outputs=[image_preview, image_preview_remove],
+            queue=False,
+            show_progress="hidden",
+        )
+        clear_image_btn.click(
+            fn=lambda: (None, gr.update(value=None, visible=False), ""),
+            outputs=[image_box, image_preview, image_preview_remove],
+            queue=False,
+            show_progress="hidden",
         )
         new_chat_btn.click(
             fn=_new_chat,
@@ -773,23 +841,92 @@ def main() -> None:
         opacity: 0 !important;
         pointer-events: none !important;
     }
+    #preview-row {
+        min-height: 0 !important;
+        margin: 0 0 6px 0 !important;
+        padding: 0 0 0 2px !important;
+        align-items: flex-start !important;
+        gap: 0 !important;
+        justify-content: flex-start !important;
+    }
     #image-preview {
-        width: 88px !important;
-        min-width: 88px !important;
-        margin: 4px 0 8px 0 !important;
-        border-radius: 12px !important;
+        position: relative !important;
+        left: 0 !important;
+        bottom: 0 !important;
+        width: 72px !important;
+        min-width: 72px !important;
+        height: 72px !important;
+        min-height: 72px !important;
+        margin: 0 !important;
+        border-radius: 14px !important;
         overflow: hidden !important;
-        border: 1px solid rgba(148, 163, 184, 0.25) !important;
+        border: 1px solid rgba(148, 163, 184, 0.35) !important;
+        z-index: 9 !important;
+        background: rgba(255,255,255,0.06) !important;
+        flex: 0 0 auto !important;
+        max-width: 72px !important;
+    }
+    #image-preview .image-container,
+    #image-preview .contain,
+    #image-preview .wrap {
+        width: 72px !important;
+        min-width: 72px !important;
+        max-width: 72px !important;
+    }
+    #image-preview .tools,
+    #image-preview [class*="tools"],
+    #image-preview .actions,
+    #image-preview [class*="action"],
+    #image-preview button[aria-label*="Expand"],
+    #image-preview button[aria-label*="Download"],
+    #image-preview button[aria-label*="Share"] {
+        display: none !important;
+        visibility: hidden !important;
+        pointer-events: none !important;
     }
     #image-preview img {
         object-fit: cover !important;
-        max-height: 88px !important;
+        width: 72px !important;
+        height: 72px !important;
+        max-width: 72px !important;
+        max-height: 72px !important;
+    }
+    #image-preview-remove-wrap {
+        position: relative !important;
+        left: -12px !important;
+        top: -6px !important;
+        width: 22px !important;
+        height: 22px !important;
+        z-index: 16 !important;
+        pointer-events: auto !important;
+    }
+    .image-preview-remove {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 22px;
+        height: 22px;
+        border-radius: 999px;
+        background: rgba(17, 24, 39, 0.92);
+        border: 1px solid rgba(148, 163, 184, 0.55);
+        color: #fff;
+        font-size: 14px;
+        font-weight: 700;
+        line-height: 20px;
+        text-align: center;
+        z-index: 17;
+        cursor: pointer;
+        user-select: none;
+        pointer-events: auto !important;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
     }
     #add-image-btn {
         position: absolute !important;
-        right: 56px !important;
+        right: 54px !important;
         bottom: 10px !important;
         z-index: 11 !important;
+        width: 34px !important;
+        min-width: 34px !important;
     }
     #add-image-btn button {
         min-width: 34px !important;
@@ -805,6 +942,10 @@ def main() -> None:
         flex: 0 0 auto !important;
         position: relative !important;
         display: block !important;
+        transition: border-color 0.2s ease, box-shadow 0.2s ease !important;
+    }
+    #input-wrap.drag-over {
+        box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.45) inset !important;
     }
     #input-box {
         width: 100% !important;
@@ -812,14 +953,17 @@ def main() -> None:
     #input-box textarea {
         min-height: 96px !important;
         padding-left: 14px !important;
-        padding-right: 98px !important;
-        padding-bottom: 12px !important;
+        padding-right: 96px !important;
+        padding-top: 14px !important;
+        padding-bottom: 56px !important;
     }
     #send-btn {
         position: absolute !important;
         right: 10px !important;
         bottom: 10px !important;
         z-index: 10 !important;
+        width: 34px !important;
+        min-width: 34px !important;
     }
     #send-btn button {
         min-width: 34px !important;
@@ -851,8 +995,30 @@ def main() -> None:
         font-size: 14px;
         letter-spacing: 0.02em;
     }
+    .uploaded-image-card {
+        display: inline-block;
+        margin-top: 10px;
+        padding: 8px;
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(148, 163, 184, 0.18);
+    }
+    .uploaded-image-link {
+        display: inline-block;
+    }
+    .uploaded-image-thumb {
+        width: min(260px, 42vw);
+        max-width: 260px;
+        min-width: 140px;
+        height: auto;
+        max-height: 260px;
+        object-fit: cover;
+        border-radius: 14px;
+        display: block;
+    }
     """)
 
 
 if __name__ == "__main__":
     main()
+
