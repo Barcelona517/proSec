@@ -1,8 +1,8 @@
 # Mini OpenClaw 作业实现说明
 
-本项目是一个基于 Python 的“迷你版 OpenClaw”实现，对应工作目录中的作业文档《OpenClaw 个人 Mini 实现-作业2.docx》。
+本项目是一个基于 Python 的“迷你版 OpenClaw”实现。
 
-它完成了作业要求中的核心能力：
+它的核心能力：
 
 - 接入大模型 API，支持多轮对话
 - 支持 Function Calling / 工具调用
@@ -13,8 +13,6 @@
 - 扩展实现了文件解析、视觉识图、工具插件化、流式输出等能力
 
 ## 项目目录
-
-下面是当前工作目录中和作业实现最相关的文件：
 
 ```text
 proSec/
@@ -171,103 +169,6 @@ proSec/
 - `delegate_subagent`
   多 Agent 雏形工具，可把子任务委托给轻量分析 Agent。
 
-## 作业要求与实现对应
-
-### 1. 大模型接入与多轮对话
-
-作业要求：
-
-- 接入至少一种大模型 API
-- 接收自然语言输入
-- 支持多轮对话，维护上下文
-
-实现方式：
-
-- 模型接入由 [llm_client.py](/c:/Users/tyy86/Desktop/proSec/llm_client.py) 完成
-- 对话历史由 [main.py](/c:/Users/tyy86/Desktop/proSec/main.py) 中的 `load_history` / `save_history` 管理
-- 在 `run_agent` 和 `run_agent_stream_with_trace` 中，将系统消息、历史消息、当前用户消息拼接后发给模型
-
-### 2. Function Calling / 工具调用
-
-作业要求：
-
-- 至少实现 3 个自定义工具函数
-- 大模型可自主判断是否调用工具、调用哪个工具、传什么参数
-- 工具结果能返回给大模型
-
-实现方式：
-
-- [tooling.py](/c:/Users/tyy86/Desktop/proSec/tooling.py) 中定义 `ToolRegistry`
-- `all_for_openai()` 将工具描述转换为 OpenAI 兼容函数定义
-- [main.py](/c:/Users/tyy86/Desktop/proSec/main.py) 中把工具列表通过 `tools=` 传给模型
-- 当模型返回 `tool_calls` 后，程序逐个执行，再把结果作为 `role=tool` 消息补回对话上下文
-
-### 3. ReAct 推理循环
-
-作业要求：
-
-- 实现 `Thought -> Action -> Observation`
-- 支持多轮工具调用
-- 具备终止条件
-
-实现方式：
-
-- [main.py](/c:/Users/tyy86/Desktop/proSec/main.py) 的 `_run_agent_core`
-  中实现循环：
-  1. 发消息给模型
-  2. 读取模型回答或工具调用
-  3. 执行工具
-  4. 把工具结果回填给模型
-  5. 若模型不再请求工具，则结束
-
-- `MAX_TURNS` 控制最大轮数，避免无限循环
-- `trace_steps` 记录每轮的 `thought / actions / observation`
-
-### 4. 本地执行与安全隔离
-
-作业要求：
-
-- 工具执行时要有基本安全检查
-- 异常要捕获并友好提示
-
-实现方式：
-
-- [tooling.py](/c:/Users/tyy86/Desktop/proSec/tooling.py) 中：
-  - `safe_resolve_path()` 强制文件操作限制在 `WORKSPACE_ROOT` 内
-  - `run_shell_command` 仅允许白名单程序与有限参数
-  - 对所有工具执行异常统一抛出 `ToolExecutionError`
-
-- [main.py](/c:/Users/tyy86/Desktop/proSec/main.py) 中：
-  - 捕获工具错误
-  - 将错误包装为结构化 JSON 返回给模型
-  - 必要时生成最终友好报错
-
-## 2.2 扩展建议完成情况
-
-根据作业文档中的“扩展建议”，本项目当前完成情况如下：
-
-- 对话历史持久化：已实现
-  - `chat_history.json`
-  - `conversations.json`
-
-- 工具插件化：已实现
-  - [tooling.py](/c:/Users/tyy86/Desktop/proSec/tooling.py) 启动时自动扫描 `tools_plugins/*.py`
-  - 插件通过 `register_tools(registry)` 动态注册
-
-- 流式输出：已实现
-  - [main.py](/c:/Users/tyy86/Desktop/proSec/main.py) 中 `run_agent_stream_with_trace`
-  - [web_ui.py](/c:/Users/tyy86/Desktop/proSec/web_ui.py) 中进行前端流式展示
-
-- 多轮规划展示：已实现
-  - 控制台输出每轮 `Thought / Action / Observation`
-  - 网页端可渲染轨迹卡片
-
-- 更安全的 shell 沙箱：已实现
-  - `run_shell_command` 带命令白名单、参数限制、超时和输出截断
-
-- 多 Agent 协作雏形：已实现
-  - `delegate_subagent`
-
 ## 网页端额外能力
 
 除了作业最小要求，网页端还额外支持：
@@ -318,12 +219,3 @@ python web_ui.py
 
 默认会在本机启动一个 Gradio 页面。
 
-## 总结
-
-这个项目已经覆盖了作业文档中的主要必做项，并完成了多项扩展能力。  
-如果把它作为课程作业提交，README 可以帮助老师快速看到：
-
-- 项目目录结构
-- 每个关键文件的职责
-- 各项作业要求的代码落点
-- 当前已经完成的扩展功能

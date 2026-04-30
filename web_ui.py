@@ -626,7 +626,7 @@ def _submit_message(
                 prompt += "\n\n另外我还上传了文件，下面是提取到的内容预览："
                 for rel, fmt, content in previews:
                     prompt += f"\n---\n文件: {rel}\n格式: {fmt or 'text'}\n内容:\n{content}"
-            answer = run_vision_agent(prompt, final_image_path)
+            answer = run_vision_agent(prompt, final_image_path, mode="auto")
             user_content = f"{prompt}\n[图片] {final_image_path}"
             for rel in staged_file_rels:
                 user_content += f"\n[文件] {rel}"
@@ -2087,6 +2087,27 @@ def main() -> None:
         color: #d1d5db;
         line-height: 1.45;
         margin-top: 4px;
+        word-break: break-word;
+    }
+    .vision-card {
+        border: 1px solid rgba(148, 163, 184, 0.25);
+        border-radius: 12px;
+        background: rgba(31, 35, 43, 0.45);
+        padding: 8px 10px;
+        margin-bottom: 12px;
+    }
+    .vision-card summary {
+        cursor: pointer;
+        font-size: 13px;
+        font-weight: 700;
+        color: #dbeafe;
+        outline: none;
+    }
+    .vision-card-body {
+        margin-top: 8px;
+        font-size: 13px;
+        line-height: 1.6;
+        color: #e5e7eb;
         word-break: break-word;
     }
     .uploaded-image-card {
