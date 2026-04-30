@@ -6,7 +6,9 @@ from html import escape
 import io
 import json
 import os
+from pathlib import Path
 import re
+import shutil
 import socket
 import urllib.parse
 from uuid import uuid4
@@ -15,6 +17,7 @@ import gradio as gr
 
 from config import HISTORY_FILE, MODEL_NAME, VISION_MODEL, WORKSPACE_ROOT
 from main import load_history, run_agent, save_history
+from tooling import ToolRegistry
 from vision_agent import run_vision_agent
 
 
@@ -22,6 +25,18 @@ os.environ["no_proxy"] = "localhost,127.0.0.1"
 os.environ["NO_PROXY"] = "localhost,127.0.0.1"
 
 CONVERSATIONS_FILE = HISTORY_FILE.with_name("conversations.json")
+UPLOADS_DIR = WORKSPACE_ROOT / "uploads"
+READABLE_FILE_TYPES = [
+    ".txt",
+    ".md",
+    ".csv",
+    ".tsv",
+    ".json",
+    ".pdf",
+    ".docx",
+    ".xlsx",
+    ".pptx",
+]
 
 
 def _now_iso() -> str:
@@ -142,11 +157,8 @@ def _render_history_sidebar(conversations: list[dict], active_id: str) -> str:
 
 
 def _format_assistant_content(thought: str, answer: str) -> str:
-    answer = (answer or "").strip()
-    thought = (thought or "").strip()
-    if thought and thought != answer:
-        return f"> 思考\n> {thought.replace(chr(10), chr(10) + '> ')}\n\n{answer}"
-    return answer
+    _ = thought
+    return (answer or "").strip()
 
 
 def _image_url(image_path: str) -> str:
@@ -166,6 +178,22 @@ def _build_uploaded_image_html(image_path: str) -> str:
     )
 
 
+def _build_uploaded_files_html(file_names_or_paths: list[str]) -> str:
+    if not file_names_or_paths:
+        return ""
+    cards: list[str] = []
+    for item in file_names_or_paths:
+        name = escape(Path(item).name)
+        ext = escape((Path(item).suffix.lower().lstrip(".") or "FILE").upper())
+        cards.append(
+            "<div class='sent-file-chip'>"
+            f"<span class='sent-file-name'>{name}</span>"
+            f"<span class='sent-file-ext'>{ext}</span>"
+            "</div>"
+        )
+    return "<div class='sent-files-wrap'>" + "".join(cards) + "</div>"
+
+
 def _extract_edited_image_path(image_edit: dict | None) -> str | None:
     if isinstance(image_edit, str) and image_edit.strip():
         return image_edit
@@ -176,6 +204,136 @@ def _extract_edited_image_path(image_edit: dict | None) -> str | None:
         if isinstance(value, str) and value.strip():
             return value
     return None
+
+
+def _normalize_file_paths(file_input: Any) -> list[str]:
+    if not file_input:
+        return []
+    if isinstance(file_input, str):
+        return [file_input]
+    if isinstance(file_input, list):
+        out: list[str] = []
+        for item in file_input:
+            if isinstance(item, str):
+                out.append(item)
+            elif isinstance(item, dict) and isinstance(item.get("path"), str):
+                out.append(item["path"])
+        return out
+    if isinstance(file_input, dict) and isinstance(file_input.get("path"), str):
+        return [file_input["path"]]
+    return []
+
+
+def _stage_uploaded_files(file_paths: list[str]) -> list[str]:
+    rel_paths: list[str] = []
+    if not file_paths:
+        return rel_paths
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    for idx, p in enumerate(file_paths, start=1):
+        src = Path(p)
+        if not src.exists() or not src.is_file():
+            continue
+        safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", src.name)
+        dst = UPLOADS_DIR / f"{ts}_{idx}_{safe_name}"
+        if src.resolve() != dst.resolve():
+            shutil.copy2(src, dst)
+        rel_paths.append(str(dst.relative_to(WORKSPACE_ROOT)).replace("\\", "/"))
+    return rel_paths
+
+
+def _on_file_selected(file_input: Any) -> tuple[list[str] | None, Any]:
+    paths = _normalize_file_paths(file_input)
+    if not paths:
+        return None, gr.update(visible=False)
+
+    valid: list[str] = []
+    for p in paths:
+        suffix = Path(p).suffix.lower()
+        if suffix in READABLE_FILE_TYPES:
+            valid.append(p)
+    if not valid:
+        return None, gr.update(visible=False)
+    return valid, gr.update(visible=True)
+
+
+def _render_attachment_strip(image_path: str | None, file_paths: list[str] | None) -> str:
+    file_paths = file_paths or []
+    has_any = bool(image_path) or bool(file_paths)
+    if not has_any:
+        return "<div class='attach-strip empty'></div>"
+
+    cards: list[str] = []
+    if image_path:
+        url = _image_url(image_path)
+        cards.append(
+            "<div class='attach-card image'>"
+            f"<img src='{url}' alt='image' />"
+            "<button class='attach-remove' data-kind='image' data-index='0'>×</button>"
+            "</div>"
+        )
+
+    for idx, fp in enumerate(file_paths):
+        name = escape(Path(fp).name)
+        ext = escape((Path(fp).suffix.lower().lstrip(".") or "file").upper())
+        cards.append(
+            "<div class='attach-card file'>"
+            f"<div class='attach-title'>{name}</div>"
+            f"<div class='attach-type'>{ext}</div>"
+            f"<button class='attach-remove' data-kind='file' data-index='{idx}'>×</button>"
+            "</div>"
+        )
+
+    return "<div class='attach-strip'>" + "".join(cards) + "</div>"
+
+
+def _add_files_to_pending(file_input: Any, pending_image: str | None, pending_files: list[str] | None) -> tuple[list[str] | None, list[str], str]:
+    paths = _normalize_file_paths(file_input)
+    current = list(pending_files or [])
+    if not paths:
+        return None, current, _render_attachment_strip(pending_image, current)
+
+    for p in paths:
+        suffix = Path(p).suffix.lower()
+        if suffix not in READABLE_FILE_TYPES:
+            continue
+        if p not in current:
+            current.append(p)
+    return None, current, _render_attachment_strip(pending_image, current)
+
+
+def _remove_pending_attachment(action: str, pending_image: str | None, pending_files: list[str] | None) -> tuple[str | None, list[str], str]:
+    image = pending_image
+    files = list(pending_files or [])
+    action = (action or "").strip()
+    if action == "image":
+        image = None
+    elif action.startswith("file:"):
+        try:
+            idx = int(action.split(":", 1)[1])
+            if 0 <= idx < len(files):
+                files.pop(idx)
+        except ValueError:
+            pass
+    return image, files, _render_attachment_strip(image, files)
+
+
+def _read_uploaded_file_previews(file_rels: list[str], max_chars_each: int = 2500, max_files: int = 4) -> list[tuple[str, str, str]]:
+    out: list[tuple[str, str, str]] = []
+    if not file_rels:
+        return out
+    tools = ToolRegistry(WORKSPACE_ROOT)
+    for rel in file_rels[:max_files]:
+        try:
+            raw = tools.execute("read_text_file", json.dumps({"path": rel, "max_chars": max_chars_each}, ensure_ascii=False))
+            data = json.loads(raw)
+            content = str(data.get("content", "") or "").strip()
+            fmt = str(data.get("detected_format", "") or "").strip()
+            if content:
+                out.append((rel, fmt, content))
+        except Exception:
+            continue
+    return out
 
 
 def _history_to_chat_messages(agent_history: list[dict]) -> list[dict[str, str]]:
@@ -195,20 +353,24 @@ def _history_to_chat_messages(agent_history: list[dict]) -> list[dict[str, str]]
                 "[图片已上传]",
                 content.strip(),
             )
+            cleaned_user = re.sub(r"(?im)^\[文件\]\s+.+$", "", cleaned_user).strip()
             chat_messages.append({"role": role, "content": cleaned_user})
     return chat_messages
 
 
 def _submit_message(
     user_message: str,
-    image_path: str | None,
+    pending_image: str | None,
+    pending_files: list[str] | None,
     image_edit: dict | None,
     chat_messages: list[dict[str, str]] | None,
     conversations: list[dict] | None,
     current_conv_id: str,
-) -> tuple[list[dict[str, str]], list[dict], str, str, str | None, dict | None, str | None, str]:
+) -> tuple[list[dict[str, str]], list[dict], str, str, Any, Any, str | None, list[str], str, str]:
     user_message = (user_message or "").strip()
-    final_image_path = _extract_edited_image_path(image_edit) or image_path
+    final_image_path = _extract_edited_image_path(image_edit) or pending_image
+    selected_file_paths = list(pending_files or [])
+    staged_file_rels = _stage_uploaded_files(selected_file_paths)
     convs = [_normalize_conversation(c) for c in list(conversations or [])]
     if not convs:
         convs, current_conv_id = _load_or_init_conversations()
@@ -216,7 +378,7 @@ def _submit_message(
     current_conv = _find_conversation(convs, current_conv_id)
     agent_history = list(current_conv.get("messages", []))
 
-    if not user_message and not final_image_path:
+    if not user_message and not final_image_path and not staged_file_rels:
         return (
             chat_messages or _history_to_chat_messages(agent_history),
             convs,
@@ -225,23 +387,40 @@ def _submit_message(
             None,
             None,
             None,
+            [],
+            _render_attachment_strip(None, []),
             _render_history_sidebar(convs, current_conv_id),
         )
 
     ui_messages = list(chat_messages or [])
     try:
         thought_text = ""
+        previews = _read_uploaded_file_previews(staged_file_rels)
         if final_image_path:
             prompt = user_message or "请识别并分析这张图片。"
+            if previews:
+                prompt += "\n\n另外我还上传了文件，下面是提取到的内容预览："
+                for rel, fmt, content in previews:
+                    prompt += f"\n---\n文件: {rel}\n格式: {fmt or 'text'}\n内容:\n{content}"
             answer = run_vision_agent(prompt, final_image_path)
+            user_content = f"{prompt}\n[图片] {final_image_path}"
+            for rel in staged_file_rels:
+                user_content += f"\n[文件] {rel}"
             new_agent_history = list(agent_history) + [
-                {"role": "user", "content": f"{prompt}\n[图片] {final_image_path}"},
+                {"role": "user", "content": user_content},
                 {"role": "assistant", "content": answer},
             ]
         else:
+            effective_input = user_message
+            if previews:
+                joined_paths = "、".join(rel for rel, _, _ in previews)
+                file_prompt = f"我上传了这些文件：{joined_paths}。请基于下面已提取内容回答。"
+                for rel, fmt, content in previews:
+                    file_prompt += f"\n---\n文件: {rel}\n格式: {fmt or 'text'}\n内容:\n{content}"
+                effective_input = f"{user_message}\n\n{file_prompt}".strip()
             buf = io.StringIO()
             with redirect_stdout(buf):
-                answer, new_agent_history = run_agent(user_message, agent_history)
+                answer, new_agent_history = run_agent(effective_input, agent_history)
             logs = buf.getvalue().splitlines()
             thoughts = [line.split("Thought/Reply:", 1)[1].strip() for line in logs if "Thought/Reply:" in line]
             thought_text = "\n".join([t for t in thoughts if t])
@@ -252,38 +431,44 @@ def _submit_message(
         current_conv["updated_at"] = _now_iso()
         _persist_conversations(convs, current_conv_id)
 
-        user_display = user_message or "请识别并分析这张图片。"
+        user_display = user_message
+        if selected_file_paths:
+            user_display = f"{user_display}\n\n{_build_uploaded_files_html(selected_file_paths)}"
         if final_image_path:
             user_display = f"{user_display}\n\n{_build_uploaded_image_html(final_image_path)}"
         ui_messages.append({"role": "user", "content": user_display})
         ui_messages.append({"role": "assistant", "content": _format_assistant_content(thought_text, answer)})
-        return ui_messages, convs, current_conv_id, "", None, None, None, _render_history_sidebar(convs, current_conv_id)
+        return ui_messages, convs, current_conv_id, "", None, None, None, [], _render_attachment_strip(None, []), _render_history_sidebar(convs, current_conv_id)
     except Exception as exc:  # noqa: BLE001
-        user_display = user_message or "请识别并分析这张图片。"
+        user_display = user_message
+        if selected_file_paths:
+            user_display = f"{user_display}\n\n{_build_uploaded_files_html(selected_file_paths)}"
         if final_image_path:
             user_display = f"{user_display}\n\n{_build_uploaded_image_html(final_image_path)}"
         ui_messages.append({"role": "user", "content": user_display})
         ui_messages.append({"role": "assistant", "content": _format_assistant_content("", f"Agent Error: {exc}")})
-        return ui_messages, convs, current_conv_id, "", None, None, None, _render_history_sidebar(convs, current_conv_id)
+        return ui_messages, convs, current_conv_id, "", None, None, None, [], _render_attachment_strip(None, []), _render_history_sidebar(convs, current_conv_id)
 
 
 def _submit_message_stream(
     user_message: str,
-    image_path: str | None,
+    pending_image: str | None,
+    pending_files: list[str] | None,
     image_edit: dict | None,
     chat_messages: list[dict[str, str]] | None,
     conversations: list[dict] | None,
     current_conv_id: str,
 ):
     user_message = (user_message or "").strip()
-    final_image_path = _extract_edited_image_path(image_edit) or image_path
+    final_image_path = _extract_edited_image_path(image_edit) or pending_image
+    selected_file_paths = list(pending_files or [])
     convs = [_normalize_conversation(c) for c in list(conversations or [])]
     if not convs:
         convs, current_conv_id = _load_or_init_conversations()
 
     current_conv = _find_conversation(convs, current_conv_id)
     agent_history = list(current_conv.get("messages", []))
-    if not user_message and not final_image_path:
+    if not user_message and not final_image_path and not selected_file_paths:
         yield (
             chat_messages or _history_to_chat_messages(agent_history),
             convs,
@@ -292,19 +477,23 @@ def _submit_message_stream(
             None,
             None,
             None,
+            [],
+            _render_attachment_strip(None, []),
             _render_history_sidebar(convs, current_conv_id),
         )
         return
 
     thinking_messages = list(chat_messages or [])
-    user_display = user_message or "请识别并分析这张图片。"
+    user_display = user_message
+    if selected_file_paths:
+        user_display = f"{user_display}\n\n{_build_uploaded_files_html([Path(p).name for p in selected_file_paths])}"
     if final_image_path:
-        user_display = f"{user_display}\n[已上传图片]"
+        user_display = f"{user_display}\n\n{_build_uploaded_image_html(final_image_path)}"
     thinking_messages.append({"role": "user", "content": user_display})
     thinking_messages.append({"role": "assistant", "content": "<div class='ai-thinking'>思考中...</div>"})
-    yield thinking_messages, convs, current_conv_id, user_message, image_path, image_edit, final_image_path, _render_history_sidebar(convs, current_conv_id)
+    yield thinking_messages, convs, current_conv_id, user_message, None, None, final_image_path, selected_file_paths, _render_attachment_strip(final_image_path, selected_file_paths), _render_history_sidebar(convs, current_conv_id)
 
-    yield _submit_message(user_message, image_path, image_edit, chat_messages, convs, current_conv_id)
+    yield _submit_message(user_message, pending_image, pending_files, image_edit, chat_messages, convs, current_conv_id)
 
 
 def _handle_history_action(
@@ -427,8 +616,60 @@ def _build_client_script() -> str:
         const target = event.target;
         if (!(target instanceof HTMLElement)) return;
         if (target.closest("#add-image-btn")) {
+          event.preventDefault();
+          event.stopPropagation();
+          const menu = document.getElementById("add-menu");
+          const anchor = document.querySelector("#add-image-btn button") || document.querySelector("#add-image-btn");
+          if (menu) {
+            if (anchor instanceof HTMLElement) {
+              const r = anchor.getBoundingClientRect();
+              const menuH = menu.offsetHeight || 70;
+              menu.style.position = "fixed";
+              menu.style.right = "auto";
+              menu.style.bottom = "auto";
+              menu.style.left = `${Math.max(8, r.left - 16)}px`;
+              menu.style.top = `${Math.max(8, r.top - menuH - 8)}px`;
+            }
+            menu.classList.toggle("open");
+          }
+          return;
+        }
+        if (target.closest("#add-menu-image")) {
+          event.preventDefault();
+          event.stopPropagation();
           const fileInput = document.querySelector("#image-box input[type='file']");
           if (fileInput instanceof HTMLElement) fileInput.click();
+          const menu = document.getElementById("add-menu");
+          if (menu) menu.classList.remove("open");
+          return;
+        }
+        if (target.closest("#add-menu-file")) {
+          event.preventDefault();
+          event.stopPropagation();
+          const fileInput = document.querySelector("#file-box input[type='file']");
+          if (fileInput instanceof HTMLInputElement) {
+            fileInput.setAttribute("accept", ".txt,.md,.csv,.tsv,.json,.pdf,.docx,.xlsx,.pptx");
+            fileInput.click();
+          }
+          const menu = document.getElementById("add-menu");
+          if (menu) menu.classList.remove("open");
+          return;
+        }
+        if (!target.closest("#add-menu") && !target.closest("#add-image-btn")) {
+          const menu = document.getElementById("add-menu");
+          if (menu) menu.classList.remove("open");
+        }
+        const removeBtn = target.closest(".attach-remove");
+        if (removeBtn instanceof HTMLElement) {
+          event.preventDefault();
+          event.stopPropagation();
+          const kind = removeBtn.getAttribute("data-kind") || "";
+          const idx = removeBtn.getAttribute("data-index") || "0";
+          const token = kind === "image" ? "image" : `file:${idx}`;
+          setTextboxValue("#attach-remove-action textarea, #attach-remove-action input", token);
+          const btn = document.querySelector("#attach-remove-dispatch button") || document.querySelector("#attach-remove-dispatch");
+          if (btn instanceof HTMLElement) btn.click();
+          return;
         }
         const previewToolBtn = target.closest("#image-preview .tools button, #image-preview [class*='tools'] button");
         const isPreviewExpandControl = !!target.closest(
@@ -558,19 +799,17 @@ def build_demo() -> gr.Blocks:
                     )
 
                 image_box = gr.Image(type="filepath", label="图片", elem_id="image-box", elem_classes="image-picker")
-                with gr.Row(elem_id="preview-row"):
-                    with gr.Group(elem_id="preview-card"):
-                        image_preview = gr.Image(
-                            type="filepath",
-                            label=None,
-                            show_label=False,
-                            interactive=False,
-                            visible=False,
-                            elem_id="image-preview",
-                        )
-                        with gr.Row(elem_id="preview-actions-row"):
-                            preview_delete_btn = gr.Button("×", elem_id="preview-delete-btn", scale=0)
-                    preview_path_box = gr.Textbox(value="", elem_id="preview-path-box", elem_classes="bridge-hidden")
+                file_box = gr.File(
+                    type="filepath",
+                    label="文件",
+                    visible=True,
+                    elem_id="file-box",
+                    file_types=READABLE_FILE_TYPES,
+                    file_count="multiple",
+                )
+                attachments_html = gr.HTML(_render_attachment_strip(None, []), elem_id="attachments-html")
+                attach_remove_action = gr.Textbox(value="", elem_id="attach-remove-action", elem_classes="bridge-hidden")
+                attach_remove_dispatch = gr.Button("remove", elem_id="attach-remove-dispatch", elem_classes="bridge-hidden")
                 image_editor = gr.ImageEditor(
                     label="图片批注（可框选重点）",
                     visible=False,
@@ -581,6 +820,14 @@ def build_demo() -> gr.Blocks:
 
                 with gr.Row(elem_id="input-wrap"):
                     add_image_btn = gr.Button("+", elem_id="add-image-btn", scale=0)
+                    gr.HTML(
+                        """
+                        <div id="add-menu" class="add-menu">
+                          <button id="add-menu-image" type="button">图片</button>
+                          <button id="add-menu-file" type="button">文件</button>
+                        </div>
+                        """
+                    )
                     message_box = gr.Textbox(
                         label="输入",
                         placeholder="给miniClaw发消息吧",
@@ -595,6 +842,8 @@ def build_demo() -> gr.Blocks:
 
         conversations_state = gr.State(conversations)
         current_conv_id_state = gr.State(active_id)
+        pending_image_state = gr.State(None)
+        pending_files_state = gr.State([])
 
         history_action = gr.Textbox(value="", elem_id="history-action-box", elem_classes="bridge-hidden")
         history_target = gr.Textbox(value="", elem_id="history-target-box", elem_classes="bridge-hidden")
@@ -602,31 +851,43 @@ def build_demo() -> gr.Blocks:
         history_dispatch = gr.Button("dispatch", elem_id="history-dispatch", elem_classes="bridge-hidden")
         send_btn.click(
             fn=_submit_message_stream,
-            inputs=[message_box, image_box, image_editor, chatbot, conversations_state, current_conv_id_state],
-            outputs=[chatbot, conversations_state, current_conv_id_state, message_box, image_box, image_editor, image_preview, history_html],
+            inputs=[message_box, pending_image_state, pending_files_state, image_editor, chatbot, conversations_state, current_conv_id_state],
+            outputs=[chatbot, conversations_state, current_conv_id_state, message_box, image_box, file_box, pending_image_state, pending_files_state, attachments_html, history_html],
         )
-        image_box.change(
-            fn=lambda path: (
-                gr.update(value=path, visible=bool(path)),
-                path or "",
-                gr.update(visible=bool(path)),
-                gr.update(visible=False),
-            ),
-            inputs=[image_box],
-            outputs=[image_preview, preview_path_box, preview_delete_btn, image_editor],
+        file_box.change(
+            fn=_add_files_to_pending,
+            inputs=[file_box, pending_image_state, pending_files_state],
+            outputs=[file_box, pending_files_state, attachments_html],
             queue=False,
             show_progress="hidden",
         )
-        preview_delete_btn.click(
-            fn=lambda: (
-                None,
-                "",
+        image_box.change(
+            fn=lambda path, files: (path, _render_attachment_strip(path, files or [])),
+            inputs=[image_box, pending_files_state],
+            outputs=[pending_image_state, attachments_html],
+            queue=False,
+            show_progress="hidden",
+        )
+        attach_remove_dispatch.click(
+            fn=_remove_pending_attachment,
+            inputs=[attach_remove_action, pending_image_state, pending_files_state],
+            outputs=[pending_image_state, pending_files_state, attachments_html],
+            queue=False,
+            show_progress="hidden",
+        )
+        # Keep these hidden components inert; old preview pipeline is disabled.
+        preview_path_box = gr.Textbox(value="", elem_id="preview-path-box", elem_classes="bridge-hidden")
+        preview_delete_btn = gr.Button("x", elem_id="preview-delete-btn", elem_classes="bridge-hidden")
+        image_preview = gr.Image(type="filepath", visible=False, elem_id="image-preview")
+        image_box.change(
+            fn=lambda _path: (
                 gr.update(value=None, visible=False),
+                "",
                 gr.update(visible=False),
                 gr.update(value=None, visible=False),
             ),
-            inputs=[],
-            outputs=[image_box, preview_path_box, image_preview, preview_delete_btn, image_editor],
+            inputs=[image_box],
+            outputs=[image_preview, preview_path_box, preview_delete_btn, image_editor],
             queue=False,
             show_progress="hidden",
         )
@@ -732,6 +993,7 @@ def main() -> None:
         max-height: 100% !important;
         display: grid !important;
         grid-template-rows: minmax(0, 1fr) auto auto !important;
+        row-gap: 0 !important;
         min-width: 0 !important;
         min-height: 0 !important;
         padding: 0 0 0 4px !important;
@@ -863,6 +1125,76 @@ def main() -> None:
         border: 1px solid #374151 !important;
         margin-top: 0 !important;
     }
+    #attachments-html {
+        margin: 0 !important;
+        padding: 0 !important;
+        border: 0 !important;
+    }
+    .attach-strip {
+        display: flex;
+        gap: 8px;
+        overflow-x: auto;
+        overflow-y: hidden;
+        padding: 0 2px 2px 2px;
+        scrollbar-width: thin;
+        border: 0 !important;
+    }
+    .attach-strip.empty {
+        display: none !important;
+    }
+    .attach-card {
+        position: relative;
+        flex: 0 0 auto;
+        width: 142px;
+        height: 68px;
+        border-radius: 12px;
+        border: 1px solid rgba(148, 163, 184, 0.20);
+        background: rgba(31, 35, 43, 0.92);
+        overflow: hidden;
+        padding: 10px 12px;
+    }
+    .attach-card.image {
+        width: 110px;
+        padding: 0;
+    }
+    .attach-card.image img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+    }
+    .attach-title {
+        font-size: 13px;
+        font-weight: 700;
+        color: #e5e7eb;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        margin: 2px 0 6px 0;
+    }
+    .attach-type {
+        font-size: 11px;
+        font-weight: 600;
+        color: #d1d5db;
+        opacity: 0.9;
+    }
+    .attach-remove {
+        position: absolute;
+        right: 8px;
+        top: 8px;
+        width: 24px;
+        height: 24px;
+        border-radius: 999px;
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        background: rgba(0, 0, 0, 0.72);
+        color: #f3f4f6;
+        font-size: 16px;
+        line-height: 1;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+    }
     #image-box.image-picker {
         position: absolute !important;
         width: 0 !important;
@@ -981,6 +1313,14 @@ def main() -> None:
         display: none !important;
         pointer-events: none !important;
     }
+    #file-box {
+        position: absolute !important;
+        width: 0 !important;
+        height: 0 !important;
+        overflow: hidden !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
+    }
     #image-preview .tools button:nth-child(1),
     #image-preview [class*="tools"] button:nth-child(1) {
         display: none !important;
@@ -988,6 +1328,26 @@ def main() -> None:
     }
     #image-editor {
         margin: 0 0 8px 0 !important;
+    }
+    #file-hint {
+        display: none !important;
+    }
+    #clear-file-btn,
+    #clear-file-btn button {
+        position: absolute !important;
+        right: 98px !important;
+        bottom: 10px !important;
+        z-index: 11 !important;
+        min-width: 30px !important;
+        width: 30px !important;
+        height: 30px !important;
+        padding: 0 !important;
+        border-radius: 999px !important;
+        border: 1px solid rgba(148, 163, 184, 0.35) !important;
+        background: rgba(0, 0, 0, 0.55) !important;
+        color: #e5e7eb !important;
+        font-size: 16px !important;
+        line-height: 1 !important;
     }
     #add-image-btn,
     #add-image-btn button {
@@ -1003,11 +1363,79 @@ def main() -> None:
         font-size: 18px !important;
         line-height: 1 !important;
     }
+    #add-menu {
+        position: fixed !important;
+        right: auto !important;
+        bottom: auto !important;
+        z-index: 12 !important;
+        display: none !important;
+        flex-direction: column !important;
+        gap: 4px !important;
+        padding: 6px !important;
+        border-radius: 10px !important;
+        background: rgba(20, 21, 25, 0.94) !important;
+        border: 1px solid rgba(148, 163, 184, 0.25) !important;
+        box-shadow: 0 8px 22px rgba(0, 0, 0, 0.35) !important;
+    }
+    #add-menu.open {
+        display: flex !important;
+    }
+    #add-menu button {
+        min-width: 64px !important;
+        height: 28px !important;
+        padding: 0 10px !important;
+        border-radius: 8px !important;
+        border: 1px solid rgba(148, 163, 184, 0.28) !important;
+        background: rgba(39, 41, 50, 0.95) !important;
+        color: #e5e7eb !important;
+        font-size: 12px !important;
+        line-height: 1 !important;
+        margin: 0 !important;
+        cursor: pointer !important;
+    }
+    #add-menu button:hover {
+        background: rgba(59, 130, 246, 0.22) !important;
+    }
     #input-wrap {
-        margin-top: 6px !important;
+        margin-top: 0 !important;
+        padding-top: 0 !important;
+        border-top: 0 !important;
         flex: 0 0 auto !important;
         position: relative !important;
         display: block !important;
+    }
+    #input-wrap::before,
+    #input-wrap::after {
+        display: none !important;
+    }
+    .sent-files-wrap {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-top: 4px;
+    }
+    .sent-file-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 8px;
+        border-radius: 10px;
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        background: rgba(31, 35, 43, 0.75);
+        max-width: 280px;
+    }
+    .sent-file-name {
+        font-size: 12px;
+        color: #e5e7eb;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 220px;
+    }
+    .sent-file-ext {
+        font-size: 10px;
+        color: #cbd5e1;
+        font-weight: 700;
     }
     #input-box {
         width: 100% !important;

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -6,9 +6,12 @@ from pathlib import Path
 from typing import Any, Callable
 import json
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
+import xml.etree.ElementTree as ET
 
 
 class ToolExecutionError(Exception):
@@ -20,7 +23,7 @@ def safe_resolve_path(root: Path, user_path: str) -> Path:
     try:
         candidate.relative_to(root)
     except ValueError as exc:
-        raise ToolExecutionError(f"路径越界: {candidate} 不在允许目录 {root} 内") from exc
+        raise ToolExecutionError(f"Path out of workspace: {candidate}; allowed root: {root}") from exc
     return candidate
 
 
@@ -42,7 +45,7 @@ class ToolRegistry:
         self.register(
             Tool(
                 name="get_current_time",
-                description="Get the current local time, or the current time for a specific UTC offset.",
+                description="Get local time, or time at a specific UTC offset.",
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -60,13 +63,13 @@ class ToolRegistry:
         self.register(
             Tool(
                 name="get_weather",
-                description="Get the current weather and a short forecast for a location.",
+                description="Get current weather and short forecast for a location.",
                 input_schema={
                     "type": "object",
                     "properties": {
                         "location": {
                             "type": "string",
-                            "description": "The city or place name to query weather for.",
+                            "description": "City or place name.",
                         }
                     },
                     "required": ["location"],
@@ -85,11 +88,11 @@ class ToolRegistry:
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "The keyword, noun, or question to search for.",
+                            "description": "Keyword, noun, or question.",
                         },
                         "max_results": {
                             "type": "integer",
-                            "description": "Maximum number of search results to return, default 5.",
+                            "description": "Maximum number of results, default 5.",
                             "minimum": 1,
                             "maximum": 10,
                         },
@@ -104,13 +107,13 @@ class ToolRegistry:
         self.register(
             Tool(
                 name="list_files",
-                description="列出指定目录下的文件与子目录",
+                description="List files and sub-directories under a workspace-relative directory.",
                 input_schema={
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "相对工作目录路径，默认 .",
+                            "description": "Workspace-relative directory path, default '.'.",
                         }
                     },
                     "required": [],
@@ -123,14 +126,14 @@ class ToolRegistry:
         self.register(
             Tool(
                 name="read_text_file",
-                description="读取文本文件内容",
+                description="Read content from text-like files. Supports txt/md/json/csv/tsv/pdf/docx/xlsx/pptx.",
                 input_schema={
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string", "description": "相对工作目录文件路径"},
+                        "path": {"type": "string", "description": "Workspace-relative file path."},
                         "max_chars": {
                             "type": "integer",
-                            "description": "最多返回字符数，默认 4000",
+                            "description": "Maximum chars to return, default 4000.",
                             "minimum": 100,
                             "maximum": 20000,
                         },
@@ -145,16 +148,16 @@ class ToolRegistry:
         self.register(
             Tool(
                 name="write_text_file",
-                description="写入文本文件，可覆盖或追加",
+                description="Write text content to a workspace file, overwrite or append.",
                 input_schema={
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string", "description": "相对工作目录文件路径"},
-                        "content": {"type": "string", "description": "要写入的文本内容"},
+                        "path": {"type": "string", "description": "Workspace-relative file path."},
+                        "content": {"type": "string", "description": "Text content to write."},
                         "mode": {
                             "type": "string",
                             "enum": ["overwrite", "append"],
-                            "description": "overwrite 覆盖，append 追加",
+                            "description": "overwrite replaces, append appends.",
                         },
                     },
                     "required": ["path", "content"],
@@ -182,14 +185,14 @@ class ToolRegistry:
 
     def execute(self, name: str, raw_arguments: str) -> str:
         if name not in self._tools:
-            raise ToolExecutionError(f"未知工具: {name}")
+            raise ToolExecutionError(f"Unknown tool: {name}")
 
         try:
             arguments = json.loads(raw_arguments or "{}")
             if not isinstance(arguments, dict):
-                raise ToolExecutionError("工具参数必须是 JSON object")
+                raise ToolExecutionError("Tool arguments must be a JSON object")
         except json.JSONDecodeError as exc:
-            raise ToolExecutionError(f"工具参数不是合法 JSON: {exc}") from exc
+            raise ToolExecutionError(f"Invalid JSON arguments: {exc}") from exc
 
         return self._tools[name].handler(arguments)
 
@@ -197,9 +200,9 @@ class ToolRegistry:
         rel_path = args.get("path", ".")
         path = safe_resolve_path(self.root, rel_path)
         if not path.exists():
-            raise ToolExecutionError(f"路径不存在: {rel_path}")
+            raise ToolExecutionError(f"Path does not exist: {rel_path}")
         if not path.is_dir():
-            raise ToolExecutionError(f"目标不是目录: {rel_path}")
+            raise ToolExecutionError(f"Target is not a directory: {rel_path}")
 
         items = []
         for p in sorted(path.iterdir(), key=lambda x: x.name.lower()):
@@ -213,21 +216,238 @@ class ToolRegistry:
         path = safe_resolve_path(self.root, rel_path)
 
         if not path.exists():
-            raise ToolExecutionError(f"文件不存在: {rel_path}")
+            raise ToolExecutionError(f"File does not exist: {rel_path}")
         if not path.is_file():
-            raise ToolExecutionError(f"目标不是文件: {rel_path}")
+            raise ToolExecutionError(f"Target is not a file: {rel_path}")
 
-        content = path.read_text(encoding="utf-8")
+        content, detected_format = self._read_file_content(path)
         clipped = content[:max_chars]
         return json.dumps(
             {
                 "path": str(path),
+                "detected_format": detected_format,
                 "content": clipped,
                 "truncated": len(content) > len(clipped),
                 "total_chars": len(content),
             },
             ensure_ascii=False,
         )
+
+    def _read_file_content(self, path: Path) -> tuple[str, str]:
+        suffix = path.suffix.lower()
+        if suffix == ".pdf":
+            return self._read_pdf(path), "pdf"
+        if suffix == ".docx":
+            return self._read_docx(path), "docx"
+        if suffix == ".xlsx":
+            return self._read_xlsx(path), "xlsx"
+        if suffix == ".pptx":
+            return self._read_pptx(path), "pptx"
+        if suffix in {".csv", ".tsv"}:
+            return self._read_csv_like(path), suffix.lstrip(".")
+        if suffix == ".json":
+            return self._read_json(path), "json"
+
+        raw = path.read_bytes()
+        if self._looks_binary(raw):
+            raise ToolExecutionError(
+                f"Unsupported binary file for direct reading: {path.name}. Supported: text/JSON/CSV/TSV/PDF/DOCX/XLSX/PPTX."
+            )
+
+        for enc in ("utf-8", "utf-8-sig", "gb18030", "gbk", "utf-16", "utf-16-le", "utf-16-be"):
+            try:
+                return raw.decode(enc), f"text({enc})"
+            except UnicodeDecodeError:
+                continue
+
+        raise ToolExecutionError(f"Unable to decode file: {path.name}. Please convert to UTF-8 text.")
+
+    def _looks_binary(self, raw: bytes) -> bool:
+        if not raw:
+            return False
+        if b"\x00" in raw:
+            return True
+        sample = raw[:4096]
+        ctrl = sum(1 for b in sample if b < 9 or (13 < b < 32))
+        return (ctrl / max(1, len(sample))) > 0.12
+
+    def _read_json(self, path: Path) -> str:
+        for enc in ("utf-8", "utf-8-sig", "gb18030", "gbk", "utf-16"):
+            try:
+                text = path.read_text(encoding=enc)
+                obj = json.loads(text)
+                return json.dumps(obj, ensure_ascii=False, indent=2)
+            except UnicodeDecodeError:
+                continue
+            except json.JSONDecodeError:
+                break
+        raise ToolExecutionError(f"JSON parse failed: {path.name}")
+
+    def _read_csv_like(self, path: Path) -> str:
+        for enc in ("utf-8", "utf-8-sig", "gb18030", "gbk"):
+            try:
+                return path.read_text(encoding=enc)
+            except UnicodeDecodeError:
+                continue
+        raise ToolExecutionError(f"CSV/TSV encoding not recognized: {path.name}")
+
+    def _read_pdf(self, path: Path) -> str:
+        try:
+            from pypdf import PdfReader  # type: ignore
+        except Exception as exc:
+            raise ToolExecutionError("PDF reader dependency missing. Install `pypdf`.") from exc
+
+        try:
+            reader = PdfReader(str(path))
+            parts: list[str] = []
+            for page in reader.pages:
+                t = (page.extract_text() or "").strip()
+                if t:
+                    parts.append(t)
+            return "\n\n".join(parts).strip()
+        except Exception as exc:
+            raise ToolExecutionError(f"PDF parse failed: {path.name}") from exc
+
+    def _read_docx(self, path: Path) -> str:
+        try:
+            from docx import Document  # type: ignore
+
+            doc = Document(str(path))
+            lines = [p.text.strip() for p in doc.paragraphs if (p.text or "").strip()]
+            if lines:
+                return "\n".join(lines)
+        except Exception:
+            pass
+
+        try:
+            with zipfile.ZipFile(path) as zf:
+                xml_bytes = zf.read("word/document.xml")
+        except Exception as exc:
+            raise ToolExecutionError(f"DOCX read failed: {path.name}") from exc
+
+        try:
+            root = ET.fromstring(xml_bytes)
+        except ET.ParseError as exc:
+            raise ToolExecutionError(f"DOCX parse failed: {path.name}") from exc
+
+        ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+        lines: list[str] = []
+        for para in root.findall(".//w:p", ns):
+            texts = [t.text or "" for t in para.findall(".//w:t", ns)]
+            line = "".join(texts).strip()
+            if line:
+                lines.append(line)
+        return "\n".join(lines)
+
+    def _read_xlsx(self, path: Path) -> str:
+        try:
+            from openpyxl import load_workbook  # type: ignore
+
+            wb = load_workbook(filename=str(path), read_only=True, data_only=True)
+            out: list[str] = []
+            for ws in wb.worksheets:
+                out.append(f"[{ws.title}]")
+                for row in ws.iter_rows(values_only=True):
+                    values = ["" if v is None else str(v) for v in row]
+                    if any(v.strip() for v in values):
+                        out.append("\t".join(values))
+            content = "\n".join(out).strip()
+            if content:
+                return content
+        except Exception:
+            pass
+
+        try:
+            with zipfile.ZipFile(path) as zf:
+                shared = self._xlsx_shared_strings(zf)
+                sheets = sorted(
+                    n
+                    for n in zf.namelist()
+                    if n.startswith("xl/worksheets/sheet") and n.endswith(".xml")
+                )
+                out: list[str] = []
+                for sheet in sheets:
+                    out.append(f"[{Path(sheet).name}]")
+                    out.extend(self._xlsx_sheet_rows(zf.read(sheet), shared))
+                return "\n".join(out).strip()
+        except Exception as exc:
+            raise ToolExecutionError(f"XLSX parse failed: {path.name}") from exc
+
+    def _xlsx_shared_strings(self, zf: zipfile.ZipFile) -> list[str]:
+        if "xl/sharedStrings.xml" not in zf.namelist():
+            return []
+        root = ET.fromstring(zf.read("xl/sharedStrings.xml"))
+        ns = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        vals: list[str] = []
+        for si in root.findall(".//s:si", ns):
+            vals.append("".join((t.text or "") for t in si.findall(".//s:t", ns)))
+        return vals
+
+    def _xlsx_sheet_rows(self, xml_bytes: bytes, shared: list[str]) -> list[str]:
+        root = ET.fromstring(xml_bytes)
+        ns = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        rows: list[str] = []
+        for row in root.findall(".//s:row", ns):
+            vals: list[str] = []
+            for cell in row.findall("s:c", ns):
+                cell_type = cell.attrib.get("t")
+                v = cell.find("s:v", ns)
+                if v is None or v.text is None:
+                    vals.append("")
+                    continue
+                txt = v.text
+                if cell_type == "s":
+                    try:
+                        txt = shared[int(txt)]
+                    except Exception:
+                        pass
+                vals.append(txt)
+            if any(v.strip() for v in vals):
+                rows.append("\t".join(vals))
+        return rows
+
+    def _read_pptx(self, path: Path) -> str:
+        try:
+            from pptx import Presentation  # type: ignore
+
+            prs = Presentation(str(path))
+            out: list[str] = []
+            for idx, slide in enumerate(prs.slides, start=1):
+                out.append(f"[slide{idx}]")
+                for shape in slide.shapes:
+                    text = (getattr(shape, "text", "") or "").strip()
+                    if text:
+                        out.append(text)
+            content = "\n".join(out).strip()
+            if content:
+                return content
+        except Exception:
+            pass
+
+        try:
+            with zipfile.ZipFile(path) as zf:
+                slides = sorted(
+                    n
+                    for n in zf.namelist()
+                    if n.startswith("ppt/slides/slide") and n.endswith(".xml")
+                )
+                out: list[str] = []
+                for slide in slides:
+                    out.append(f"[{Path(slide).name}]")
+                    out.extend(self._pptx_slide_lines(zf.read(slide)))
+                return "\n".join(out).strip()
+        except Exception as exc:
+            raise ToolExecutionError(f"PPTX parse failed: {path.name}") from exc
+
+    def _pptx_slide_lines(self, xml_bytes: bytes) -> list[str]:
+        root = ET.fromstring(xml_bytes)
+        ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+        lines: list[str] = []
+        for p in root.findall(".//a:p", ns):
+            line = "".join((t.text or "") for t in p.findall(".//a:t", ns)).strip()
+            if line:
+                lines.append(line)
+        return lines
 
     def _write_text_file(self, args: dict[str, Any]) -> str:
         rel_path = args["path"]
@@ -278,14 +498,14 @@ class ToolRegistry:
         )
 
     def _parse_utc_offset(self, value: str) -> timezone:
-        match = __import__("re").fullmatch(r"([+-])(\d{2}):(\d{2})", value)
+        match = re.fullmatch(r"([+-])(\d{2}):(\d{2})", value)
         if not match:
-            raise ToolExecutionError("utc_offset 必须是类似 +08:00 或 -05:00 的格式。")
+            raise ToolExecutionError("utc_offset must be like +08:00 or -05:00")
         sign, hours_str, minutes_str = match.groups()
         hours = int(hours_str)
         minutes = int(minutes_str)
         if hours > 23 or minutes > 59:
-            raise ToolExecutionError("utc_offset 超出有效范围。")
+            raise ToolExecutionError("utc_offset out of valid range")
         total_minutes = hours * 60 + minutes
         if sign == "-":
             total_minutes = -total_minutes
@@ -336,7 +556,7 @@ class ToolRegistry:
         answer = self._extract_360_answer_text(data)
         results = self._extract_360_references(data, max_results)
         if not answer and not results:
-            raise ToolExecutionError("360 搜索返回成功，但未解析到可用内容，请检查账号权限或返回格式。")
+            raise ToolExecutionError("360 search returned no usable content")
 
         return json.dumps(
             {
@@ -496,15 +716,13 @@ class ToolRegistry:
                 text = str(item.get("Text", "")).strip()
                 link = str(item.get("FirstURL", "")).strip()
                 if text:
-                    title = text.split(" - ", 1)[0].split(" – ", 1)[0]
+                    title = text.split(" - ", 1)[0]
                     results.append({"title": title, "link": link, "snippet": text})
 
         collect_topics(data.get("RelatedTopics", []))
 
         if not results:
-            raise ToolExecutionError(
-                "没有搜到可用结果。你可以换个更完整的关键词，或在 .env 中配置 SEARCH360_API_KEY 使用 360 搜索。"
-            )
+            raise ToolExecutionError("No usable search results found")
 
         return json.dumps(
             {
@@ -522,139 +740,113 @@ class ToolRegistry:
         except urllib.error.HTTPError as exc:
             body = ""
             try:
-                body = exc.read().decode("utf-8", errors="ignore").strip()
+                body = exc.read().decode("utf-8", errors="ignore")
             except Exception:
-                body = ""
-            detail = f"{provider_label} request failed: HTTP {exc.code} {exc.reason}"
-            if body:
-                detail = f"{detail}; body={body[:300]}"
-            raise ToolExecutionError(detail) from exc
+                pass
+            raise ToolExecutionError(f"{provider_label} HTTP {exc.code}: {body[:200]}") from exc
         except urllib.error.URLError as exc:
-            raise ToolExecutionError(f"{provider_label} request failed: {exc}") from exc
+            raise ToolExecutionError(f"{provider_label} network error: {exc.reason}") from exc
+        except json.JSONDecodeError as exc:
+            raise ToolExecutionError(f"{provider_label} returned invalid JSON: {exc}") from exc
 
     def _get_weather(self, args: dict[str, Any]) -> str:
         location = str(args["location"]).strip()
         if not location:
             raise ToolExecutionError("location cannot be empty")
 
-        geocode_url = "https://geocoding-api.open-meteo.com/v1/search?" + urllib.parse.urlencode(
-            {
-                "name": location,
-                "count": 1,
-                "language": "zh",
-                "format": "json",
-            }
+        geocode_url = (
+            "https://geocoding-api.open-meteo.com/v1/search?"
+            + urllib.parse.urlencode({"name": location, "count": 1, "language": "zh", "format": "json"})
         )
-        geocode_request = urllib.request.Request(
-            geocode_url,
-            headers={"User-Agent": "Mozilla/5.0"},
-            method="GET",
-        )
-        geocode_data = self._load_json_response(geocode_request, "Open-Meteo geocoding")
-        results = geocode_data.get("results") or []
-        if not results:
-            raise ToolExecutionError(f"没有找到地点 `{location}` 的天气位置。")
+        geocode_req = urllib.request.Request(geocode_url, method="GET", headers={"User-Agent": "Mozilla/5.0"})
+        geo = self._load_json_response(geocode_req, "open-meteo geocoding")
+        results = geo.get("results")
+        if not isinstance(results, list) or not results:
+            raise ToolExecutionError(f"Location not found: {location}")
 
         place = results[0]
-        latitude = place.get("latitude")
-        longitude = place.get("longitude")
-        if latitude is None or longitude is None:
-            raise ToolExecutionError("地理编码成功，但缺少经纬度信息。")
+        lat = place.get("latitude")
+        lon = place.get("longitude")
+        if lat is None or lon is None:
+            raise ToolExecutionError(f"Location missing coordinates: {location}")
 
-        weather_url = "https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode(
-            {
-                "latitude": latitude,
-                "longitude": longitude,
-                "current": "temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,weather_code,wind_speed_10m",
-                "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
-                "timezone": "auto",
-                "forecast_days": 3,
-            }
-        )
-        weather_request = urllib.request.Request(
-            weather_url,
-            headers={"User-Agent": "Mozilla/5.0"},
-            method="GET",
-        )
-        weather_data = self._load_json_response(weather_request, "Open-Meteo weather")
+        weather_params = {
+            "latitude": lat,
+            "longitude": lon,
+            "current": "temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m",
+            "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum",
+            "timezone": "auto",
+            "forecast_days": 3,
+        }
+        weather_url = "https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode(weather_params)
+        weather_req = urllib.request.Request(weather_url, method="GET", headers={"User-Agent": "Mozilla/5.0"})
+        data = self._load_json_response(weather_req, "open-meteo weather")
 
-        current = weather_data.get("current", {})
-        daily = weather_data.get("daily", {})
-        forecast: list[dict[str, Any]] = []
-        dates = daily.get("time") or []
-        codes = daily.get("weather_code") or []
-        tmax = daily.get("temperature_2m_max") or []
-        tmin = daily.get("temperature_2m_min") or []
-        rain = daily.get("precipitation_probability_max") or []
+        current = data.get("current", {})
+        daily = data.get("daily", {})
+        dates = daily.get("time", []) or []
+        max_t = daily.get("temperature_2m_max", []) or []
+        min_t = daily.get("temperature_2m_min", []) or []
+        rain = daily.get("precipitation_sum", []) or []
+        d_code = daily.get("weather_code", []) or []
+
+        forecast = []
         for i in range(min(3, len(dates))):
             forecast.append(
                 {
                     "date": dates[i],
-                    "weather": self._weather_code_to_text(codes[i] if i < len(codes) else None),
-                    "temp_max_c": tmax[i] if i < len(tmax) else None,
-                    "temp_min_c": tmin[i] if i < len(tmin) else None,
-                    "precipitation_probability_max": rain[i] if i < len(rain) else None,
+                    "weather": self._weather_code_to_text(d_code[i] if i < len(d_code) else None),
+                    "temp_max_c": max_t[i] if i < len(max_t) else None,
+                    "temp_min_c": min_t[i] if i < len(min_t) else None,
+                    "precipitation_mm": rain[i] if i < len(rain) else None,
                 }
             )
 
         return json.dumps(
             {
-                "location_query": location,
+                "query_location": location,
                 "resolved_location": {
-                    "name": place.get("name", ""),
-                    "admin1": place.get("admin1", ""),
-                    "country": place.get("country", ""),
-                    "latitude": latitude,
-                    "longitude": longitude,
+                    "name": place.get("name"),
+                    "country": place.get("country"),
+                    "admin1": place.get("admin1"),
+                    "latitude": lat,
+                    "longitude": lon,
                 },
                 "current": {
-                    "time": current.get("time"),
                     "temperature_c": current.get("temperature_2m"),
-                    "apparent_temperature_c": current.get("apparent_temperature"),
-                    "humidity_percent": current.get("relative_humidity_2m"),
+                    "feels_like_c": current.get("apparent_temperature"),
+                    "humidity": current.get("relative_humidity_2m"),
                     "wind_speed_kmh": current.get("wind_speed_10m"),
                     "precipitation_mm": current.get("precipitation"),
                     "weather": self._weather_code_to_text(current.get("weather_code")),
-                    "is_day": current.get("is_day"),
                 },
                 "forecast": forecast,
-                "provider": "open-meteo",
             },
             ensure_ascii=False,
         )
 
     def _weather_code_to_text(self, code: Any) -> str:
         mapping = {
-            0: "晴",
-            1: "大体晴",
-            2: "局部多云",
-            3: "阴",
+            0: "晴朗",
+            1: "少云",
+            2: "多云",
+            3: "阴天",
             45: "雾",
             48: "冻雾",
             51: "小毛毛雨",
             53: "毛毛雨",
             55: "强毛毛雨",
-            56: "冻毛毛雨",
-            57: "强冻毛毛雨",
             61: "小雨",
             63: "中雨",
             65: "大雨",
-            66: "冻雨",
-            67: "强冻雨",
             71: "小雪",
             73: "中雪",
             75: "大雪",
-            77: "雪粒",
-            80: "小阵雨",
-            81: "阵雨",
+            80: "阵雨",
+            81: "较强阵雨",
             82: "强阵雨",
-            85: "小阵雪",
-            86: "强阵雪",
             95: "雷暴",
-            96: "雷暴伴小冰雹",
-            99: "雷暴伴强冰雹",
         }
-        try:
-            return mapping.get(int(code), f"未知天气代码 {code}")
-        except Exception:
-            return "未知"
+        if isinstance(code, (int, float)):
+            return mapping.get(int(code), f"未知天气代码({int(code)})")
+        return "未知"
