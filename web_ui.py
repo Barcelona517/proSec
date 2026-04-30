@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from contextlib import redirect_stdout
 from datetime import datetime
@@ -8,6 +8,7 @@ import json
 import os
 import re
 import socket
+import urllib.parse
 from uuid import uuid4
 
 import gradio as gr
@@ -35,7 +36,7 @@ def _make_title_from_messages(messages: list[dict]) -> str:
         if not content:
             continue
         cleaned = re.sub(r"[\r\n]+", " ", content)
-        cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.!?;:，。！？；：")
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.!?;:，。！；")
         return cleaned[:18] + ("..." if len(cleaned) > 18 else "")
     return "新对话"
 
@@ -144,9 +145,37 @@ def _format_assistant_content(thought: str, answer: str) -> str:
     answer = (answer or "").strip()
     thought = (thought or "").strip()
     if thought and thought != answer:
-        safe_thought = escape(thought).replace("\n", "<br>")
-        return f"<div class='ai-thought'>{safe_thought}</div>{answer}"
+        return f"> 思考\n> {thought.replace(chr(10), chr(10) + '> ')}\n\n{answer}"
     return answer
+
+
+def _image_url(image_path: str) -> str:
+    safe_path = urllib.parse.quote(image_path.replace("\\", "/"), safe="/:")
+    return f"/gradio_api/file={safe_path}"
+
+
+def _build_uploaded_image_html(image_path: str) -> str:
+    url = _image_url(image_path)
+    return (
+        "<div class='uploaded-image-card'>"
+        f"<a class='uploaded-image-open' href='{url}' target='_blank' rel='noopener noreferrer'>"
+        f"<img class='uploaded-image-thumb' src='{url}' alt='uploaded image' />"
+        "</a>"
+        f"<a class='uploaded-image-download' href='{url}' download target='_blank' rel='noopener noreferrer'>↓</a>"
+        "</div>"
+    )
+
+
+def _extract_edited_image_path(image_edit: dict | None) -> str | None:
+    if isinstance(image_edit, str) and image_edit.strip():
+        return image_edit
+    if not isinstance(image_edit, dict):
+        return None
+    for key in ("composite", "background"):
+        value = image_edit.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
 
 
 def _history_to_chat_messages(agent_history: list[dict]) -> list[dict[str, str]]:
@@ -161,18 +190,25 @@ def _history_to_chat_messages(agent_history: list[dict]) -> list[dict[str, str]]
         if role == "assistant":
             chat_messages.append({"role": role, "content": _format_assistant_content("", content)})
         else:
-            chat_messages.append({"role": role, "content": content})
+            cleaned_user = re.sub(
+                r"(?im)^\[图片\]\s+.+(?:\\|/)(?:temp|tmp)(?:\\|/).*?\.(?:png|jpg|jpeg|webp|bmp)\s*$",
+                "[图片已上传]",
+                content.strip(),
+            )
+            chat_messages.append({"role": role, "content": cleaned_user})
     return chat_messages
 
 
 def _submit_message(
     user_message: str,
     image_path: str | None,
+    image_edit: dict | None,
     chat_messages: list[dict[str, str]] | None,
     conversations: list[dict] | None,
     current_conv_id: str,
-) -> tuple[list[dict[str, str]], list[dict], str, str, str | None, str | None, str]:
+) -> tuple[list[dict[str, str]], list[dict], str, str, str | None, dict | None, str | None, str]:
     user_message = (user_message or "").strip()
+    final_image_path = _extract_edited_image_path(image_edit) or image_path
     convs = [_normalize_conversation(c) for c in list(conversations or [])]
     if not convs:
         convs, current_conv_id = _load_or_init_conversations()
@@ -180,12 +216,13 @@ def _submit_message(
     current_conv = _find_conversation(convs, current_conv_id)
     agent_history = list(current_conv.get("messages", []))
 
-    if not user_message and not image_path:
+    if not user_message and not final_image_path:
         return (
             chat_messages or _history_to_chat_messages(agent_history),
             convs,
             current_conv_id,
             "",
+            None,
             None,
             None,
             _render_history_sidebar(convs, current_conv_id),
@@ -194,11 +231,11 @@ def _submit_message(
     ui_messages = list(chat_messages or [])
     try:
         thought_text = ""
-        if image_path:
+        if final_image_path:
             prompt = user_message or "请识别并分析这张图片。"
-            answer = run_vision_agent(prompt, image_path)
+            answer = run_vision_agent(prompt, final_image_path)
             new_agent_history = list(agent_history) + [
-                {"role": "user", "content": f"{prompt}\n[图片] {image_path}"},
+                {"role": "user", "content": f"{prompt}\n[图片] {final_image_path}"},
                 {"role": "assistant", "content": answer},
             ]
         else:
@@ -216,40 +253,43 @@ def _submit_message(
         _persist_conversations(convs, current_conv_id)
 
         user_display = user_message or "请识别并分析这张图片。"
-        if image_path:
-            user_display = f"{user_display}\n[已上传图片]"
+        if final_image_path:
+            user_display = f"{user_display}\n\n{_build_uploaded_image_html(final_image_path)}"
         ui_messages.append({"role": "user", "content": user_display})
         ui_messages.append({"role": "assistant", "content": _format_assistant_content(thought_text, answer)})
-        return ui_messages, convs, current_conv_id, "", None, None, _render_history_sidebar(convs, current_conv_id)
+        return ui_messages, convs, current_conv_id, "", None, None, None, _render_history_sidebar(convs, current_conv_id)
     except Exception as exc:  # noqa: BLE001
         user_display = user_message or "请识别并分析这张图片。"
-        if image_path:
-            user_display = f"{user_display}\n[已上传图片]"
+        if final_image_path:
+            user_display = f"{user_display}\n\n{_build_uploaded_image_html(final_image_path)}"
         ui_messages.append({"role": "user", "content": user_display})
         ui_messages.append({"role": "assistant", "content": _format_assistant_content("", f"Agent Error: {exc}")})
-        return ui_messages, convs, current_conv_id, "", None, None, _render_history_sidebar(convs, current_conv_id)
+        return ui_messages, convs, current_conv_id, "", None, None, None, _render_history_sidebar(convs, current_conv_id)
 
 
 def _submit_message_stream(
     user_message: str,
     image_path: str | None,
+    image_edit: dict | None,
     chat_messages: list[dict[str, str]] | None,
     conversations: list[dict] | None,
     current_conv_id: str,
 ):
     user_message = (user_message or "").strip()
+    final_image_path = _extract_edited_image_path(image_edit) or image_path
     convs = [_normalize_conversation(c) for c in list(conversations or [])]
     if not convs:
         convs, current_conv_id = _load_or_init_conversations()
 
     current_conv = _find_conversation(convs, current_conv_id)
     agent_history = list(current_conv.get("messages", []))
-    if not user_message and not image_path:
+    if not user_message and not final_image_path:
         yield (
             chat_messages or _history_to_chat_messages(agent_history),
             convs,
             current_conv_id,
             "",
+            None,
             None,
             None,
             _render_history_sidebar(convs, current_conv_id),
@@ -258,13 +298,13 @@ def _submit_message_stream(
 
     thinking_messages = list(chat_messages or [])
     user_display = user_message or "请识别并分析这张图片。"
-    if image_path:
+    if final_image_path:
         user_display = f"{user_display}\n[已上传图片]"
     thinking_messages.append({"role": "user", "content": user_display})
     thinking_messages.append({"role": "assistant", "content": "<div class='ai-thinking'>思考中...</div>"})
-    yield thinking_messages, convs, current_conv_id, user_message, image_path, image_path, _render_history_sidebar(convs, current_conv_id)
+    yield thinking_messages, convs, current_conv_id, user_message, image_path, image_edit, final_image_path, _render_history_sidebar(convs, current_conv_id)
 
-    yield _submit_message(user_message, image_path, chat_messages, convs, current_conv_id)
+    yield _submit_message(user_message, image_path, image_edit, chat_messages, convs, current_conv_id)
 
 
 def _handle_history_action(
@@ -390,6 +430,29 @@ def _build_client_script() -> str:
           const fileInput = document.querySelector("#image-box input[type='file']");
           if (fileInput instanceof HTMLElement) fileInput.click();
         }
+        const previewToolBtn = target.closest("#image-preview .tools button, #image-preview [class*='tools'] button");
+        const isPreviewExpandControl = !!target.closest(
+          "#image-preview button[aria-label*='Expand'], " +
+          "#image-preview button[aria-label*='放大'], " +
+          "#image-preview [title*='Expand'], " +
+          "#image-preview [title*='放大']"
+        ) || (
+          previewToolBtn instanceof HTMLButtonElement &&
+          previewToolBtn.parentElement &&
+          Array.from(previewToolBtn.parentElement.querySelectorAll("button")).indexOf(previewToolBtn) === 0
+        );
+        if (isPreviewExpandControl) {
+          event.preventDefault();
+          event.stopPropagation();
+          const previewPathEl = document.querySelector("#preview-path-box textarea, #preview-path-box input");
+          const rawPath = previewPathEl ? (previewPathEl.value || "").trim() : "";
+          if (!rawPath) return;
+          const normalized = rawPath.replace(/\\\\/g, "/");
+          const encoded = encodeURI(normalized).replace(/#/g, "%23");
+          const fileUrl = `/gradio_api/file=${encoded}`;
+          window.open(fileUrl, "_blank", "noopener,noreferrer");
+          return;
+        }
       });
 
       const bindUi = () => {
@@ -463,11 +526,7 @@ def build_demo() -> gr.Blocks:
             """
             <div class="header-wrap">
               <div class="page-title">pre OpenClaw</div>
-              <div class="page-meta">文本模型: """
-            + escape(MODEL_NAME)
-            + """ | 视觉模型: """
-            + escape(VISION_MODEL)
-            + """ | 工作目录: """
+              <div class="page-meta">工作目录: """
             + escape(str(WORKSPACE_ROOT))
             + """</div>
             </div>
@@ -497,13 +556,34 @@ def build_demo() -> gr.Blocks:
                         ],
                         elem_id="chat-window",
                     )
+
                 image_box = gr.Image(type="filepath", label="图片", elem_id="image-box", elem_classes="image-picker")
-                image_preview = gr.Image(type="filepath", label=None, show_label=False, interactive=False, elem_id="image-preview")
+                with gr.Row(elem_id="preview-row"):
+                    with gr.Group(elem_id="preview-card"):
+                        image_preview = gr.Image(
+                            type="filepath",
+                            label=None,
+                            show_label=False,
+                            interactive=False,
+                            visible=False,
+                            elem_id="image-preview",
+                        )
+                        with gr.Row(elem_id="preview-actions-row"):
+                            preview_delete_btn = gr.Button("×", elem_id="preview-delete-btn", scale=0)
+                    preview_path_box = gr.Textbox(value="", elem_id="preview-path-box", elem_classes="bridge-hidden")
+                image_editor = gr.ImageEditor(
+                    label="图片批注（可框选重点）",
+                    visible=False,
+                    type="filepath",
+                    brush=gr.Brush(colors=["#ff4d4f", "#00e5ff", "#ffd700"], default_size=6),
+                    elem_id="image-editor",
+                )
+
                 with gr.Row(elem_id="input-wrap"):
                     add_image_btn = gr.Button("+", elem_id="add-image-btn", scale=0)
                     message_box = gr.Textbox(
                         label="输入",
-                        placeholder="Enter 发送，Shift+Enter 换行；上传图片后可直接问图中内容",
+                        placeholder="给miniClaw发消息吧",
                         lines=4,
                         elem_id="input-box",
                         show_label=False,
@@ -520,16 +600,35 @@ def build_demo() -> gr.Blocks:
         history_target = gr.Textbox(value="", elem_id="history-target-box", elem_classes="bridge-hidden")
         history_payload = gr.Textbox(value="", elem_id="history-payload-box", elem_classes="bridge-hidden")
         history_dispatch = gr.Button("dispatch", elem_id="history-dispatch", elem_classes="bridge-hidden")
-
         send_btn.click(
             fn=_submit_message_stream,
-            inputs=[message_box, image_box, chatbot, conversations_state, current_conv_id_state],
-            outputs=[chatbot, conversations_state, current_conv_id_state, message_box, image_box, image_preview, history_html],
+            inputs=[message_box, image_box, image_editor, chatbot, conversations_state, current_conv_id_state],
+            outputs=[chatbot, conversations_state, current_conv_id_state, message_box, image_box, image_editor, image_preview, history_html],
         )
         image_box.change(
-            fn=lambda path: path,
+            fn=lambda path: (
+                gr.update(value=path, visible=bool(path)),
+                path or "",
+                gr.update(visible=bool(path)),
+                gr.update(visible=False),
+            ),
             inputs=[image_box],
-            outputs=[image_preview],
+            outputs=[image_preview, preview_path_box, preview_delete_btn, image_editor],
+            queue=False,
+            show_progress="hidden",
+        )
+        preview_delete_btn.click(
+            fn=lambda: (
+                None,
+                "",
+                gr.update(value=None, visible=False),
+                gr.update(visible=False),
+                gr.update(value=None, visible=False),
+            ),
+            inputs=[],
+            outputs=[image_box, preview_path_box, image_preview, preview_delete_btn, image_editor],
+            queue=False,
+            show_progress="hidden",
         )
         new_chat_btn.click(
             fn=_new_chat,
@@ -543,7 +642,6 @@ def build_demo() -> gr.Blocks:
         )
 
     return demo
-
 
 def _is_port_available(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -773,25 +871,130 @@ def main() -> None:
         opacity: 0 !important;
         pointer-events: none !important;
     }
+    #preview-row {
+        display: none !important;
+        min-height: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        position: relative !important;
+    }
+    #preview-row:has(#image-preview:not([style*="display: none"])) {
+        display: inline-flex !important;
+        align-items: flex-start !important;
+        justify-content: flex-start !important;
+        width: fit-content !important;
+        margin: 0 0 6px 0 !important;
+    }
+    #preview-card {
+        position: relative !important;
+        width: 72px !important;
+        min-width: 72px !important;
+        max-width: 72px !important;
+        height: 72px !important;
+        min-height: 72px !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        border: 0 !important;
+        background: transparent !important;
+        overflow: visible !important;
+        flex: 0 0 auto !important;
+    }
     #image-preview {
-        width: 88px !important;
-        min-width: 88px !important;
-        margin: 4px 0 8px 0 !important;
+        width: 72px !important;
+        min-width: 72px !important;
+        max-width: 72px !important;
+        height: 72px !important;
+        margin: 0 !important;
         border-radius: 12px !important;
         overflow: hidden !important;
         border: 1px solid rgba(148, 163, 184, 0.25) !important;
+        flex: 0 0 auto !important;
     }
     #image-preview img {
         object-fit: cover !important;
-        max-height: 88px !important;
+        width: 72px !important;
+        height: 72px !important;
+        max-width: 72px !important;
+        max-height: 72px !important;
     }
-    #add-image-btn {
+    #preview-actions-row {
+        display: none !important;
+        position: absolute !important;
+        top: -8px !important;
+        right: -8px !important;
+        gap: 0 !important;
+        margin: 0 !important;
+        min-height: 0 !important;
+        z-index: 999 !important;
+        pointer-events: auto !important;
+    }
+    #preview-row:has(#image-preview:not([style*="display: none"])) #preview-actions-row {
+        display: flex !important;
+    }
+    #preview-delete-btn {
+        flex: 0 0 auto !important;
+        width: 24px !important;
+        min-width: 24px !important;
+        max-width: 24px !important;
+        height: 24px !important;
+        min-height: 24px !important;
+        pointer-events: auto !important;
+    }
+    #preview-delete-btn button {
+        width: 24px !important;
+        min-width: 24px !important;
+        max-width: 24px !important;
+        height: 24px !important;
+        min-height: 24px !important;
+        padding: 0 !important;
+        border-radius: 999px !important;
+        border: 1px solid rgba(255, 255, 255, 0.16) !important;
+        background: rgba(0, 0, 0, 0.86) !important;
+        font-size: 15px !important;
+        color: #fff !important;
+        line-height: 1 !important;
+        box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35) !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        cursor: pointer !important;
+        pointer-events: auto !important;
+    }
+    #preview-delete-btn,
+    #preview-delete-btn button {
+        opacity: 1 !important;
+        visibility: visible !important;
+    }
+    /* Hide built-in expand/share; keep built-in download. */
+    #image-preview .tools button:first-child,
+    #image-preview [class*="tools"] button:first-child,
+    #image-preview .tools button:last-child,
+    #image-preview [class*="tools"] button:last-child,
+    #image-preview button[aria-label*="Expand" i],
+    #image-preview button[aria-label*="放大"],
+    #image-preview [title*="Expand" i],
+    #image-preview [title*="放大"],
+    #image-preview button[aria-label*="Share" i],
+    #image-preview button[aria-label*="分享"],
+    #image-preview [title*="Share" i],
+    #image-preview [title*="分享"] {
+        display: none !important;
+        pointer-events: none !important;
+    }
+    #image-preview .tools button:nth-child(1),
+    #image-preview [class*="tools"] button:nth-child(1) {
+        display: none !important;
+        pointer-events: none !important;
+    }
+    #image-editor {
+        margin: 0 0 8px 0 !important;
+    }
+    #add-image-btn,
+    #add-image-btn button {
         position: absolute !important;
         right: 56px !important;
         bottom: 10px !important;
         z-index: 11 !important;
-    }
-    #add-image-btn button {
         min-width: 34px !important;
         width: 34px !important;
         height: 34px !important;
@@ -815,13 +1018,12 @@ def main() -> None:
         padding-right: 98px !important;
         padding-bottom: 12px !important;
     }
-    #send-btn {
+    #send-btn,
+    #send-btn button {
         position: absolute !important;
         right: 10px !important;
         bottom: 10px !important;
         z-index: 10 !important;
-    }
-    #send-btn button {
         min-width: 34px !important;
         width: 34px !important;
         min-height: 34px !important;
@@ -851,8 +1053,44 @@ def main() -> None:
         font-size: 14px;
         letter-spacing: 0.02em;
     }
+    .uploaded-image-card {
+        position: relative;
+        display: inline-block;
+        margin-top: 10px;
+        border-radius: 16px;
+        overflow: hidden;
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        background: rgba(255, 255, 255, 0.03);
+        max-width: min(320px, 60vw);
+    }
+    .uploaded-image-open {
+        display: block;
+    }
+    .uploaded-image-thumb {
+        display: block;
+        width: min(320px, 60vw);
+        max-width: 320px;
+        max-height: 280px;
+        object-fit: cover;
+    }
+    .uploaded-image-download {
+        position: absolute;
+        right: 8px;
+        top: 8px;
+        width: 28px;
+        height: 28px;
+        border-radius: 999px;
+        background: rgba(17, 24, 39, 0.82);
+        color: #fff !important;
+        text-decoration: none !important;
+        font-weight: 700;
+        line-height: 28px;
+        text-align: center;
+        box-shadow: 0 6px 16px rgba(0, 0, 0, 0.28);
+    }
     """)
 
 
 if __name__ == "__main__":
     main()
+
