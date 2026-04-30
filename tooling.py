@@ -7,6 +7,7 @@ from typing import Any, Callable
 import json
 import os
 import re
+import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -164,6 +165,59 @@ class ToolRegistry:
                     "additionalProperties": False,
                 },
                 handler=self._write_text_file,
+            )
+        )
+        self.register(
+            Tool(
+                name="run_shell_command",
+                description=(
+                    "Run a strictly validated shell command from an allow-list. "
+                    "Only safe read-oriented commands are supported."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "array",
+                            "description": "Command and args as tokenized string list, e.g. ['python','--version'].",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                            "maxItems": 20,
+                        },
+                        "timeout_seconds": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 20,
+                            "description": "Execution timeout in seconds. Default 8.",
+                        },
+                    },
+                    "required": ["command"],
+                    "additionalProperties": False,
+                },
+                handler=self._run_shell_command,
+            )
+        )
+        self.register(
+            Tool(
+                name="delegate_subagent",
+                description=(
+                    "Delegate a focused analysis subtask to a lightweight sub-agent. "
+                    "Useful for summarizing uploaded files or extracting key points."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "task": {"type": "string", "description": "The subtask to delegate."},
+                        "files": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional workspace-relative file paths for sub-agent analysis.",
+                        },
+                    },
+                    "required": ["task"],
+                    "additionalProperties": False,
+                },
+                handler=self._delegate_subagent,
             )
         )
 
@@ -464,6 +518,148 @@ class ToolRegistry:
             path.write_text(content, encoding="utf-8")
 
         return json.dumps({"path": str(path), "mode": mode, "written_chars": len(content)}, ensure_ascii=False)
+
+    def _run_shell_command(self, args: dict[str, Any]) -> str:
+        cmd = args.get("command")
+        if not isinstance(cmd, list) or not cmd or not all(isinstance(x, str) and x.strip() for x in cmd):
+            raise ToolExecutionError("command must be a non-empty string array")
+
+        timeout_seconds = int(args.get("timeout_seconds", 8))
+        if timeout_seconds < 1 or timeout_seconds > 20:
+            raise ToolExecutionError("timeout_seconds must be in [1, 20]")
+
+        command = [x.strip() for x in cmd]
+        program = command[0].lower()
+        blocked_chars = {"|", "&&", "||", ";", ">", "<", "$(", "`"}
+        for token in command:
+            if any(sym in token for sym in blocked_chars):
+                raise ToolExecutionError("shell meta characters are not allowed")
+
+        allowed = {
+            "python": {"--version", "-V", "-m"},
+            "py": {"--version", "-V"},
+            "where": None,
+            "whoami": None,
+            "dir": None,
+        }
+        if program not in allowed:
+            raise ToolExecutionError(f"command not allowed: {program}")
+
+        if program in {"python", "py"}:
+            if len(command) == 1:
+                raise ToolExecutionError("python command requires explicit safe args")
+            if command[1] not in allowed[program]:
+                raise ToolExecutionError(f"python arg not allowed: {command[1]}")
+            if command[1:3] == ["-m", "pip"]:
+                if len(command) < 4 or command[3] not in {"show"}:
+                    raise ToolExecutionError("only 'python -m pip show <pkg>' is allowed")
+                if len(command) != 5:
+                    raise ToolExecutionError("pip show requires exactly one package name")
+                pkg = command[4]
+                if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", pkg):
+                    raise ToolExecutionError("invalid package name for pip show")
+            elif len(command) > 2:
+                raise ToolExecutionError("only python --version / -V or python -m pip show <pkg> are allowed")
+
+        if program == "where":
+            if len(command) != 2:
+                raise ToolExecutionError("where requires exactly one executable name")
+            if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", command[1]):
+                raise ToolExecutionError("invalid target for where")
+
+        if program in {"whoami", "dir"} and len(command) != 1:
+            raise ToolExecutionError(f"{program} does not accept extra args in sandbox mode")
+
+        if program == "dir":
+            # Use PowerShell Get-ChildItem instead of cmd built-in.
+            ps_cmd = ["powershell", "-NoProfile", "-Command", "Get-ChildItem -Name"]
+            try:
+                completed = subprocess.run(
+                    ps_cmd,
+                    cwd=str(self.root),
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_seconds,
+                    shell=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise ToolExecutionError(f"command timeout after {timeout_seconds}s") from exc
+        else:
+            try:
+                completed = subprocess.run(
+                    command,
+                    cwd=str(self.root),
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_seconds,
+                    shell=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise ToolExecutionError(f"command timeout after {timeout_seconds}s") from exc
+
+        return json.dumps(
+            {
+                "ok": completed.returncode == 0,
+                "returncode": completed.returncode,
+                "stdout": completed.stdout[:6000],
+                "stderr": completed.stderr[:3000],
+            },
+            ensure_ascii=False,
+        )
+
+    def _delegate_subagent(self, args: dict[str, Any]) -> str:
+        from llm_client import build_client
+        from config import MODEL_NAME
+
+        task = str(args.get("task", "")).strip()
+        if not task:
+            raise ToolExecutionError("task cannot be empty")
+        files = args.get("files", [])
+        if files is None:
+            files = []
+        if not isinstance(files, list):
+            raise ToolExecutionError("files must be a string array")
+
+        snippets: list[str] = []
+        for rel in files[:5]:
+            if not isinstance(rel, str) or not rel.strip():
+                continue
+            try:
+                raw = self._read_text_file({"path": rel.strip(), "max_chars": 2500})
+                payload = json.loads(raw)
+                snippets.append(
+                    f"[{rel.strip()} | {payload.get('detected_format','text')}]\n{payload.get('content','')}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                snippets.append(f"[{rel.strip()}] read failed: {exc}")
+
+        system_prompt = (
+            "You are a delegated sub-agent. Solve only the requested subtask clearly and briefly. "
+            "If file snippets are provided, prioritize them."
+        )
+        user_prompt = task
+        if snippets:
+            user_prompt += "\n\nFile snippets:\n" + "\n\n---\n\n".join(snippets)
+
+        client = build_client()
+        resp = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.2,
+        )
+        answer = (resp.choices[0].message.content or "").strip()
+        return json.dumps(
+            {
+                "ok": True,
+                "task": task,
+                "used_files": files[:5],
+                "answer": answer,
+            },
+            ensure_ascii=False,
+        )
 
     def _get_current_time(self, args: dict[str, Any]) -> str:
         utc_offset = str(args.get("utc_offset", "") or "").strip()

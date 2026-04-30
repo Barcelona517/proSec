@@ -1,9 +1,7 @@
 ﻿from __future__ import annotations
 
-from contextlib import redirect_stdout
 from datetime import datetime
 from html import escape
-import io
 import json
 import os
 from pathlib import Path
@@ -16,7 +14,7 @@ from uuid import uuid4
 import gradio as gr
 
 from config import HISTORY_FILE, MODEL_NAME, VISION_MODEL, WORKSPACE_ROOT
-from main import load_history, run_agent, save_history
+from main import load_history, run_agent_stream_with_trace, run_agent_with_trace, save_history
 from tooling import ToolRegistry
 from vision_agent import run_vision_agent
 
@@ -159,6 +157,35 @@ def _render_history_sidebar(conversations: list[dict], active_id: str) -> str:
 def _format_assistant_content(thought: str, answer: str) -> str:
     _ = thought
     return (answer or "").strip()
+
+
+def _render_trace_cards(trace_steps: list[dict]) -> str:
+    if not trace_steps:
+        return ""
+    cards: list[str] = []
+    for step in trace_steps:
+        turn = int(step.get("turn", 0) or 0)
+        thought = escape(str(step.get("thought", "") or "").strip())
+        actions = step.get("actions", [])
+        body: list[str] = []
+        if thought:
+            body.append(f"<div class='plan-line'><b>Thought</b> {thought}</div>")
+        if isinstance(actions, list):
+            for action in actions:
+                tool_name = escape(str(action.get("tool", "") or ""))
+                args_text = escape(str(action.get("arguments", "") or ""))
+                obs_text = escape(str(action.get("observation", "") or ""))
+                body.append(f"<div class='plan-line'><b>Action</b> {tool_name}({args_text})</div>")
+                body.append(f"<div class='plan-line'><b>Observation</b> {obs_text[:360]}</div>")
+        if not body:
+            continue
+        cards.append(
+            "<details class='plan-card'>"
+            f"<summary>第 {turn} 轮规划</summary>"
+            + "".join(body)
+            + "</details>"
+        )
+    return "<div class='plan-cards'>" + "".join(cards) + "</div>"
 
 
 def _image_url(image_path: str) -> str:
@@ -395,6 +422,7 @@ def _submit_message(
     ui_messages = list(chat_messages or [])
     try:
         thought_text = ""
+        trace_steps: list[dict] = []
         previews = _read_uploaded_file_previews(staged_file_rels)
         if final_image_path:
             prompt = user_message or "请识别并分析这张图片。"
@@ -418,12 +446,9 @@ def _submit_message(
                 for rel, fmt, content in previews:
                     file_prompt += f"\n---\n文件: {rel}\n格式: {fmt or 'text'}\n内容:\n{content}"
                 effective_input = f"{user_message}\n\n{file_prompt}".strip()
-            buf = io.StringIO()
-            with redirect_stdout(buf):
-                answer, new_agent_history = run_agent(effective_input, agent_history)
-            logs = buf.getvalue().splitlines()
-            thoughts = [line.split("Thought/Reply:", 1)[1].strip() for line in logs if "Thought/Reply:" in line]
-            thought_text = "\n".join([t for t in thoughts if t])
+            answer, new_agent_history, trace_steps = run_agent_with_trace(effective_input, agent_history)
+            thoughts = [str(s.get("thought", "")).strip() for s in trace_steps if str(s.get("thought", "")).strip()]
+            thought_text = "\n".join(thoughts)
 
         current_conv["messages"] = new_agent_history
         if current_conv.get("title") in {"", "新对话"} or len(agent_history) == 0:
@@ -437,7 +462,11 @@ def _submit_message(
         if final_image_path:
             user_display = f"{user_display}\n\n{_build_uploaded_image_html(final_image_path)}"
         ui_messages.append({"role": "user", "content": user_display})
-        ui_messages.append({"role": "assistant", "content": _format_assistant_content(thought_text, answer)})
+        plan_cards = _render_trace_cards(trace_steps)
+        assistant_content = _format_assistant_content(thought_text, answer)
+        if plan_cards:
+            assistant_content = plan_cards + assistant_content
+        ui_messages.append({"role": "assistant", "content": assistant_content})
         return ui_messages, convs, current_conv_id, "", None, None, None, [], _render_attachment_strip(None, []), _render_history_sidebar(convs, current_conv_id)
     except Exception as exc:  # noqa: BLE001
         user_display = user_message
@@ -462,6 +491,7 @@ def _submit_message_stream(
     user_message = (user_message or "").strip()
     final_image_path = _extract_edited_image_path(image_edit) or pending_image
     selected_file_paths = list(pending_files or [])
+    staged_file_rels = _stage_uploaded_files(selected_file_paths)
     convs = [_normalize_conversation(c) for c in list(conversations or [])]
     if not convs:
         convs, current_conv_id = _load_or_init_conversations()
@@ -493,7 +523,95 @@ def _submit_message_stream(
     thinking_messages.append({"role": "assistant", "content": "<div class='ai-thinking'>思考中...</div>"})
     yield thinking_messages, convs, current_conv_id, user_message, None, None, final_image_path, selected_file_paths, _render_attachment_strip(final_image_path, selected_file_paths), _render_history_sidebar(convs, current_conv_id)
 
-    yield _submit_message(user_message, pending_image, pending_files, image_edit, chat_messages, convs, current_conv_id)
+    if final_image_path:
+        # Vision path keeps existing non-stream flow.
+        yield _submit_message(user_message, pending_image, pending_files, image_edit, chat_messages, convs, current_conv_id)
+        return
+
+    ui_messages = list(chat_messages or [])
+    try:
+        previews = _read_uploaded_file_previews(staged_file_rels)
+        effective_input = user_message
+        if previews:
+            joined_paths = "、".join(rel for rel, _, _ in previews)
+            file_prompt = f"我上传了这些文件：{joined_paths}。请基于下面已提取内容回答。"
+            for rel, fmt, content in previews:
+                file_prompt += f"\n---\n文件: {rel}\n格式: {fmt or 'text'}\n内容:\n{content}"
+            effective_input = f"{user_message}\n\n{file_prompt}".strip()
+
+        stream_text = ""
+        final_answer = ""
+        trace_steps: list[dict] = []
+        new_agent_history = list(agent_history)
+        stream_events = run_agent_stream_with_trace(effective_input, agent_history)
+        for event in stream_events:
+            if event.get("type") == "assistant_delta":
+                stream_text += str(event.get("text", ""))
+                partial_msgs = list(thinking_messages)
+                partial_msgs[-1] = {"role": "assistant", "content": _format_assistant_content("", stream_text)}
+                yield (
+                    partial_msgs,
+                    convs,
+                    current_conv_id,
+                    user_message,
+                    None,
+                    None,
+                    final_image_path,
+                    selected_file_paths,
+                    _render_attachment_strip(final_image_path, selected_file_paths),
+                    _render_history_sidebar(convs, current_conv_id),
+                )
+            elif event.get("type") == "final":
+                final_answer = str(event.get("answer", "") or "")
+                new_agent_history = list(event.get("history", []) or [])
+                trace_steps = list(event.get("trace_steps", []) or [])
+
+        current_conv["messages"] = new_agent_history
+        if current_conv.get("title") in {"", "新对话"} or len(agent_history) == 0:
+            current_conv["title"] = _make_title_from_messages(new_agent_history)
+        current_conv["updated_at"] = _now_iso()
+        _persist_conversations(convs, current_conv_id)
+
+        user_display = user_message
+        if selected_file_paths:
+            user_display = f"{user_display}\n\n{_build_uploaded_files_html(selected_file_paths)}"
+        ui_messages.append({"role": "user", "content": user_display})
+        assistant_content = _format_assistant_content("", final_answer or stream_text)
+        plan_cards = _render_trace_cards(trace_steps)
+        if plan_cards:
+            assistant_content = plan_cards + assistant_content
+        ui_messages.append({"role": "assistant", "content": assistant_content})
+        yield (
+            ui_messages,
+            convs,
+            current_conv_id,
+            "",
+            None,
+            None,
+            None,
+            [],
+            _render_attachment_strip(None, []),
+            _render_history_sidebar(convs, current_conv_id),
+        )
+    except Exception as exc:  # noqa: BLE001
+        err_msgs = list(ui_messages)
+        user_display = user_message
+        if selected_file_paths:
+            user_display = f"{user_display}\n\n{_build_uploaded_files_html(selected_file_paths)}"
+        err_msgs.append({"role": "user", "content": user_display})
+        err_msgs.append({"role": "assistant", "content": _format_assistant_content("", f"Agent Error: {exc}")})
+        yield (
+            err_msgs,
+            convs,
+            current_conv_id,
+            "",
+            None,
+            None,
+            None,
+            [],
+            _render_attachment_strip(None, []),
+            _render_history_sidebar(convs, current_conv_id),
+        )
 
 
 def _handle_history_action(
@@ -1480,6 +1598,32 @@ def main() -> None:
         color: #9ca3af;
         font-size: 14px;
         letter-spacing: 0.02em;
+    }
+    .plan-cards {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        margin: 0 0 10px 0;
+    }
+    .plan-card {
+        border: 1px solid rgba(148, 163, 184, 0.25);
+        border-radius: 10px;
+        background: rgba(31, 35, 43, 0.45);
+        padding: 6px 8px;
+    }
+    .plan-card summary {
+        cursor: pointer;
+        font-size: 12px;
+        color: #9ca3af;
+        font-weight: 600;
+        outline: none;
+    }
+    .plan-line {
+        font-size: 12px;
+        color: #d1d5db;
+        line-height: 1.45;
+        margin-top: 4px;
+        word-break: break-word;
     }
     .uploaded-image-card {
         position: relative;
