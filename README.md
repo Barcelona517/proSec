@@ -71,3 +71,26 @@ python web_ui.py
 - 必做 3（ReAct 循环+终止条件）：`main.py` 中 `run_agent`
 - 必做 4（安全与异常）：`tooling.py` 中 `safe_resolve_path` 与错误处理
 - 扩展项（历史持久化）：`chat_history.json` 读写逻辑
+# Tool Plugins (Dynamic Registration)
+
+You can now add tools without editing core files.
+
+1. Create plugin files under `tools_plugins/`, for example:
+`tools_plugins/my_tools.py`
+
+2. Export a function in plugin file:
+
+```python
+def register_tools(registry):
+    registry.register(...)
+```
+
+3. Restart app; plugins are auto-loaded by `ToolRegistry`.
+
+4. Optional: limit loaded plugins via `.env`:
+
+```env
+ENABLED_TOOL_PLUGINS=my_tools,another_tools
+```
+
+If `ENABLED_TOOL_PLUGINS` is empty, all `tools_plugins/*.py` (except `_*.py`) are loaded.

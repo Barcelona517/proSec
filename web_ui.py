@@ -9,6 +9,7 @@ import re
 import shutil
 import socket
 import urllib.parse
+import zipfile
 from uuid import uuid4
 
 import gradio as gr
@@ -35,6 +36,199 @@ READABLE_FILE_TYPES = [
     ".xlsx",
     ".pptx",
 ]
+PLUGIN_DIR = WORKSPACE_ROOT / "tools_plugins"
+ENV_FILE = WORKSPACE_ROOT / ".env"
+
+
+def _installed_plugins() -> list[str]:
+    if not PLUGIN_DIR.exists():
+        return []
+    names: list[str] = []
+    for p in sorted(PLUGIN_DIR.glob("*.py"), key=lambda x: x.name.lower()):
+        if p.name.startswith("_"):
+            continue
+        names.append(p.stem)
+    return names
+
+
+def _read_enabled_plugins_from_env() -> set[str] | None:
+    if not ENV_FILE.exists():
+        return None
+    text = ENV_FILE.read_text(encoding="utf-8")
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#") or "=" not in s:
+            continue
+        k, v = s.split("=", 1)
+        if k.strip() == "ENABLED_TOOL_PLUGINS":
+            raw = v.strip()
+            if not raw:
+                return set()
+            return {x.strip() for x in raw.split(",") if x.strip()}
+    return None
+
+
+def _write_enabled_plugins_to_env(enabled: set[str] | None) -> None:
+    ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
+    text = ENV_FILE.read_text(encoding="utf-8") if ENV_FILE.exists() else ""
+    lines = text.splitlines()
+    rendered = ""
+    if enabled is not None:
+        rendered = ",".join(sorted(enabled))
+    replaced = False
+    out: list[str] = []
+    for line in lines:
+        s = line.strip()
+        if s.startswith("ENABLED_TOOL_PLUGINS="):
+            out.append(f"ENABLED_TOOL_PLUGINS={rendered}")
+            replaced = True
+        else:
+            out.append(line)
+    if not replaced:
+        out.append(f"ENABLED_TOOL_PLUGINS={rendered}")
+    ENV_FILE.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
+
+
+def _render_plugins_html() -> str:
+    installed = _installed_plugins()
+    enabled = _read_enabled_plugins_from_env()
+    if not installed:
+        return (
+            "<div class='plugin-list-header'>"
+            "<span>插件列表</span>"
+            "<button class='plugin-delete-btn' disabled>删除</button>"
+            "</div>"
+            "<div class='plugin-empty'>还没有插件。点击上方“选择插件文件”上传 .py 或 .zip。</div>"
+        )
+    cards: list[str] = []
+    for name in installed:
+        is_enabled = True if enabled is None else (name in enabled)
+        state = "已启用" if is_enabled else "未启用"
+        state_class = "enabled" if is_enabled else "disabled"
+        cards.append(
+            "<div class='plugin-card'>"
+            "<label class='plugin-check-wrap'>"
+            f"<input type='checkbox' class='plugin-del-check' value='{escape(name)}' />"
+            "</label>"
+            f"<div class='plugin-name'>{escape(name)}</div>"
+            f"<button class='plugin-state {state_class}' data-plugin-toggle='{escape(name)}'>{state}</button>"
+            "</div>"
+        )
+    return (
+        "<div class='plugin-list-header'>"
+        "<span>插件列表</span>"
+        "<button class='plugin-delete-btn' onclick='window.__pluginDeleteSelected && window.__pluginDeleteSelected()'>删除</button>"
+        "</div>"
+        "<div class='plugin-list'>"
+        + "".join(cards)
+        + "</div>"
+    )
+
+
+def _refresh_plugin_panel() -> tuple[str, str]:
+    return _render_plugins_html(), "插件列表已刷新。"
+
+
+def _install_plugin_file(file_input: Any) -> tuple[str, Any, str]:
+    if not file_input:
+        return _render_plugins_html(), gr.update(value=None), "请先选择插件文件。"
+    path = Path(str(file_input))
+    if not path.exists():
+        return _render_plugins_html(), gr.update(value=None), "未找到上传文件，请重试。"
+
+    PLUGIN_DIR.mkdir(parents=True, exist_ok=True)
+    installed_now: list[str] = []
+    suffix = path.suffix.lower()
+    try:
+        if suffix == ".py":
+            safe_name = re.sub(r"[^A-Za-z0-9_-]", "_", path.stem)[:64] or "plugin"
+            dst = PLUGIN_DIR / f"{safe_name}.py"
+            shutil.copy2(path, dst)
+            installed_now.append(safe_name)
+        elif suffix == ".zip":
+            with zipfile.ZipFile(path) as zf:
+                for info in zf.infolist():
+                    inner = Path(info.filename)
+                    if info.is_dir():
+                        continue
+                    if inner.suffix.lower() != ".py":
+                        continue
+                    base = inner.name
+                    if base.startswith("_"):
+                        continue
+                    safe_name = re.sub(r"[^A-Za-z0-9_-]", "_", Path(base).stem)[:64] or "plugin"
+                    dst = PLUGIN_DIR / f"{safe_name}.py"
+                    with zf.open(info, "r") as src, dst.open("wb") as out:
+                        out.write(src.read())
+                    installed_now.append(safe_name)
+            if not installed_now:
+                return _render_plugins_html(), gr.update(value=None), "zip 内未找到可安装的 .py 插件文件。"
+        else:
+            return _render_plugins_html(), gr.update(value=None), "仅支持 .py 或 .zip 插件文件。"
+    except Exception as exc:  # noqa: BLE001
+        return _render_plugins_html(), gr.update(value=None), f"安装失败：{exc}"
+
+    enabled = _read_enabled_plugins_from_env()
+    if enabled is not None:
+        for name in installed_now:
+            enabled.add(name)
+        _write_enabled_plugins_to_env(enabled)
+
+    msg = f"安装完成：{', '.join(installed_now)}。重启 web_ui.py 后生效。"
+    return _render_plugins_html(), gr.update(value=None), msg
+
+
+def _toggle_plugin(target: str, enable: bool) -> tuple[str, str]:
+    target = (target or "").strip()
+    installed = set(_installed_plugins())
+    if not target or target not in installed:
+        return _render_plugins_html(), "请先选择一个已安装插件。"
+    enabled = _read_enabled_plugins_from_env()
+    if enabled is None:
+        enabled = set(installed)
+    if enable:
+        enabled.add(target)
+    else:
+        enabled.discard(target)
+    _write_enabled_plugins_to_env(enabled)
+    return _render_plugins_html(), f"{target} 已{'启用' if enable else '禁用'}（重启后生效）。"
+
+
+def _toggle_plugin_by_name(target: str) -> tuple[str, str]:
+    target = (target or "").strip()
+    installed = set(_installed_plugins())
+    if not target or target not in installed:
+        return _render_plugins_html(), "未找到该插件。"
+    enabled = _read_enabled_plugins_from_env()
+    if enabled is None:
+        enabled = set(installed)
+    enable = target not in enabled
+    if enable:
+        enabled.add(target)
+    else:
+        enabled.discard(target)
+    _write_enabled_plugins_to_env(enabled)
+    return _render_plugins_html(), f"{target} 已{'启用' if enable else '禁用'}（重启后生效）。"
+
+
+def _remove_plugins_batch(targets_csv: str) -> tuple[str, str]:
+    names = [x.strip() for x in (targets_csv or "").split(",") if x.strip()]
+    installed = set(_installed_plugins())
+    targets = [n for n in names if n in installed]
+    if not targets:
+        return _render_plugins_html(), "请先勾选要删除的插件。"
+    removed: list[str] = []
+    for target in targets:
+        file_path = PLUGIN_DIR / f"{target}.py"
+        if file_path.exists():
+            file_path.unlink()
+            removed.append(target)
+    enabled = _read_enabled_plugins_from_env()
+    if enabled is not None:
+        for target in targets:
+            enabled.discard(target)
+        _write_enabled_plugins_to_env(enabled)
+    return _render_plugins_html(), f"已删除：{', '.join(removed)}（重启后生效）。"
 
 
 def _now_iso() -> str:
@@ -104,12 +298,14 @@ def _load_or_init_conversations() -> tuple[list[dict], str]:
         try:
             data = json.loads(CONVERSATIONS_FILE.read_text(encoding="utf-8"))
             conversations = data.get("conversations", [])
-            active_id = str(data.get("active_id", ""))
             if isinstance(conversations, list) and conversations:
                 convs = [_normalize_conversation(c) for c in conversations if isinstance(c, dict)]
                 if convs:
-                    if not any(c.get("id") == active_id for c in convs):
-                        active_id = convs[0]["id"]
+                    # Always start with a fresh conversation on page open,
+                    # while keeping existing history in sidebar.
+                    new_conv = _new_conversation([])
+                    convs.append(new_conv)
+                    active_id = new_conv["id"]
                     return convs, active_id
         except json.JSONDecodeError:
             pass
@@ -133,7 +329,7 @@ def _render_history_sidebar(conversations: list[dict], active_id: str) -> str:
         items.append(
             f"""
             <div class="history-item{active_class}" data-conv-id="{conv_id}">
-              <button class="history-main" onclick="window.__historyAction('select', '{conv_id}')">
+              <button type="button" class="history-main" data-history-action="select" data-conv-id="{conv_id}">
                 <div class="history-title-row">
                   <span class="history-title">{title}</span>
                   {pin_mark}
@@ -141,11 +337,11 @@ def _render_history_sidebar(conversations: list[dict], active_id: str) -> str:
                 <div class="history-time">{updated}</div>
               </button>
               <div class="history-menu-wrap">
-                <button class="history-menu-btn" onclick="window.__toggleHistoryMenu(event, '{conv_id}')">•••</button>
+                <button type="button" class="history-menu-btn" data-history-menu-btn="1" data-conv-id="{conv_id}">•••</button>
                 <div class="history-menu" id="history-menu-{conv_id}">
-                  <button onclick="window.__historyRename('{conv_id}')">重命名</button>
-                  <button onclick="window.__historyAction('pin', '{conv_id}')">{pin_text}</button>
-                  <button class="danger" onclick="window.__historyAction('delete', '{conv_id}')">删除</button>
+                  <button type="button" data-history-action="rename" data-conv-id="{conv_id}">重命名</button>
+                  <button type="button" data-history-action="pin" data-conv-id="{conv_id}">{pin_text}</button>
+                  <button type="button" class="danger" data-history-action="delete" data-conv-id="{conv_id}">删除</button>
                 </div>
               </div>
             </div>
@@ -620,7 +816,7 @@ def _handle_history_action(
     payload: str,
     conversations: list[dict] | None,
     current_conv_id: str,
-) -> tuple[str, list[dict], str, list[dict[str, str]], str]:
+) -> tuple[str, list[dict], str, list[dict[str, str]], str, str]:
     convs = [_normalize_conversation(c) for c in list(conversations or [])]
     if not convs:
         convs, current_conv_id = _load_or_init_conversations()
@@ -633,11 +829,11 @@ def _handle_history_action(
         selected = _find_conversation(convs, target_id)
         active_id = str(selected["id"])
         save_history(HISTORY_FILE, selected.get("messages", []))
-        return _render_history_sidebar(convs, active_id), convs, active_id, _history_to_chat_messages(selected.get("messages", [])), ""
+        return _render_history_sidebar(convs, active_id), convs, active_id, _history_to_chat_messages(selected.get("messages", [])), "", _render_attachment_strip(None, [])
 
     if not target_id:
         active = _find_conversation(convs, current_conv_id)
-        return _render_history_sidebar(convs, current_conv_id), convs, current_conv_id, _history_to_chat_messages(active.get("messages", [])), ""
+        return _render_history_sidebar(convs, current_conv_id), convs, current_conv_id, _history_to_chat_messages(active.get("messages", [])), "", _render_attachment_strip(None, [])
 
     conv = _find_conversation(convs, target_id)
     if action == "rename":
@@ -660,16 +856,16 @@ def _handle_history_action(
         _persist_conversations(convs, current_conv_id)
 
     active = _find_conversation(convs, current_conv_id)
-    return _render_history_sidebar(convs, current_conv_id), convs, current_conv_id, _history_to_chat_messages(active.get("messages", [])), ""
+    return _render_history_sidebar(convs, current_conv_id), convs, current_conv_id, _history_to_chat_messages(active.get("messages", [])), "", _render_attachment_strip(None, [])
 
 
-def _new_chat(conversations: list[dict]) -> tuple[str, list[dict], str, list[dict[str, str]], str]:
+def _new_chat(conversations: list[dict]) -> tuple[str, list[dict], str, list[dict[str, str]], str, str]:
     convs = [_normalize_conversation(c) for c in list(conversations or [])]
     conv = _new_conversation([])
     convs.append(conv)
     active_id = conv["id"]
     _persist_conversations(convs, active_id)
-    return _render_history_sidebar(convs, active_id), convs, active_id, [], ""
+    return _render_history_sidebar(convs, active_id), convs, active_id, [], "", _render_attachment_strip(None, [])
 
 
 def _build_client_script() -> str:
@@ -693,46 +889,107 @@ def _build_client_script() -> str:
         setTextboxValue("#history-target-box textarea, #history-target-box input", targetId);
         setTextboxValue("#history-payload-box textarea, #history-payload-box input", payload);
         const btn = document.querySelector("#history-dispatch button") || document.querySelector("#history-dispatch");
-        if (btn) btn.click();
-      };
-
-      window.__historyAction = (action, targetId) => {
-        document.querySelectorAll(".history-menu.open").forEach((menu) => menu.classList.remove("open"));
-        if (action === "delete") {
-          const ok = window.confirm("确定删除这条历史对话吗？");
-          if (!ok) return;
-        }
-        dispatchHistoryAction(action, targetId, "");
-      };
-
-      window.__historyRename = (targetId) => {
-        document.querySelectorAll(".history-menu.open").forEach((menu) => menu.classList.remove("open"));
-        const currentTitle = document.querySelector(`.history-item[data-conv-id="${targetId}"] .history-title`)?.innerText || "";
-        const newTitle = window.prompt("输入新的会话名称", currentTitle);
-        if (newTitle && newTitle.trim()) {
-          dispatchHistoryAction("rename", targetId, newTitle.trim());
+        if (btn) {
+          window.setTimeout(() => btn.click(), 0);
         }
       };
-
-      window.__toggleHistoryMenu = (event, targetId) => {
-        event.preventDefault();
-        event.stopPropagation();
-        const menu = document.getElementById(`history-menu-${targetId}`);
-        if (!menu) return;
-        const alreadyOpen = menu.classList.contains("open");
-        document.querySelectorAll(".history-menu.open").forEach((node) => node.classList.remove("open"));
-        if (!alreadyOpen) menu.classList.add("open");
-      };
-
-      document.addEventListener("click", (event) => {
-        if (!event.target.closest(".history-menu-wrap")) {
-          document.querySelectorAll(".history-menu.open").forEach((menu) => menu.classList.remove("open"));
-        }
-      });
 
       document.addEventListener("click", (event) => {
         const target = event.target;
         if (!(target instanceof HTMLElement)) return;
+        const historyButton = target.closest("[data-history-action]");
+        if (historyButton instanceof HTMLElement) {
+          event.preventDefault();
+          event.stopPropagation();
+          const action = historyButton.getAttribute("data-history-action") || "";
+          const convId = historyButton.getAttribute("data-conv-id") || "";
+          document.querySelectorAll(".history-menu.open").forEach((menu) => menu.classList.remove("open"));
+          if (action === "select") {
+            dispatchHistoryAction("select", convId, "");
+            return;
+          }
+          if (action === "rename") {
+            const currentTitle = document.querySelector(`.history-item[data-conv-id="${convId}"] .history-title`)?.innerText || "";
+            const newTitle = window.prompt("输入新的会话名称", currentTitle);
+            if (newTitle && newTitle.trim()) dispatchHistoryAction("rename", convId, newTitle.trim());
+            return;
+          }
+          if (action === "pin") {
+            dispatchHistoryAction("pin", convId, "");
+            return;
+          }
+          if (action === "delete") {
+            const ok = window.confirm("确定删除这条历史对话吗？");
+            if (!ok) return;
+            dispatchHistoryAction("delete", convId, "");
+            return;
+          }
+        }
+        if (target.closest("[data-history-menu-btn]")) {
+          event.preventDefault();
+          event.stopPropagation();
+          const btn = target.closest("[data-history-menu-btn]");
+          const convId = btn instanceof HTMLElement ? btn.getAttribute("data-conv-id") || "" : "";
+          const menu = document.getElementById(`history-menu-${convId}`);
+          if (!menu) return;
+          const alreadyOpen = menu.classList.contains("open");
+          document.querySelectorAll(".history-menu.open").forEach((node) => node.classList.remove("open"));
+          if (!alreadyOpen) menu.classList.add("open");
+          return;
+        }
+        if (!target.closest(".history-menu-wrap")) {
+          document.querySelectorAll(".history-menu.open").forEach((menu) => menu.classList.remove("open"));
+        }
+      });
+
+      window.__openPluginPanel = () => {
+        const panel = document.getElementById("plugin-panel");
+        if (panel) panel.classList.add("open");
+      };
+
+      window.__closePluginPanel = () => {
+        const panel = document.getElementById("plugin-panel");
+        if (panel) panel.classList.remove("open");
+      };
+
+      const dispatchPluginToggle = (name) => {
+        if (!name) return;
+        setTextboxValue("#plugin-toggle-target textarea, #plugin-toggle-target input", name);
+        const btn = document.querySelector("#plugin-toggle-dispatch button") || document.querySelector("#plugin-toggle-dispatch");
+        if (btn) btn.click();
+      };
+
+      window.__pluginDeleteSelected = () => {
+        const checks = Array.from(document.querySelectorAll(".plugin-del-check:checked"));
+        const names = checks
+          .map((el) => el && "value" in el ? String(el.value || "").trim() : "")
+          .filter(Boolean);
+        if (!names.length) {
+          return;
+        }
+        const ok = window.confirm(`确定删除 ${names.length} 个插件吗？`);
+        if (!ok) return;
+        setTextboxValue("#plugin-delete-targets textarea, #plugin-delete-targets input", names.join(","));
+        const btn = document.querySelector("#plugin-delete-dispatch button") || document.querySelector("#plugin-delete-dispatch");
+        if (btn) btn.click();
+      };
+
+      document.addEventListener("click", (event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLElement)) return;
+        if (target.closest("#plugin-close-btn")) {
+          event.preventDefault();
+          event.stopPropagation();
+          window.__closePluginPanel && window.__closePluginPanel();
+          return;
+        }
+        const toggleBtn = target.closest("[data-plugin-toggle]");
+        if (toggleBtn instanceof HTMLElement) {
+          event.preventDefault();
+          event.stopPropagation();
+          dispatchPluginToggle(toggleBtn.getAttribute("data-plugin-toggle") || "");
+          return;
+        }
         if (target.closest("#add-image-btn")) {
           event.preventDefault();
           event.stopPropagation();
@@ -888,6 +1145,7 @@ def build_demo() -> gr.Blocks:
               <div class="page-meta">工作目录: """
             + escape(str(WORKSPACE_ROOT))
             + """</div>
+              <button id="plugin-top-btn" type="button" onclick="window.__openPluginPanel && window.__openPluginPanel()">插件中心</button>
             </div>
             """
         )
@@ -897,6 +1155,29 @@ def build_demo() -> gr.Blocks:
                 gr.Markdown("### 历史对话")
                 history_html = gr.HTML(initial_history_html, elem_id="history-list")
                 new_chat_btn = gr.Button("+ 新建对话", elem_id="new-chat-btn")
+                with gr.Column(elem_id="plugin-panel"):
+                    gr.HTML(
+                        """
+                        <div class="plugin-drawer-header">
+                          <div class="plugin-drawer-title">插件中心</div>
+                          <button id="plugin-close-btn" type="button">×</button>
+                        </div>
+                        """
+                    )
+                    plugin_status = gr.Markdown("选择 `.py` 或 `.zip`，然后点“安装插件”。")
+                    plugin_file = gr.File(
+                        type="filepath",
+                        label="选择插件文件",
+                        file_types=[".py", ".zip"],
+                        file_count="single",
+                    )
+                    install_plugin_btn = gr.Button("安装插件", variant="primary")
+                    refresh_plugins_btn = gr.Button("刷新列表")
+                    plugin_list_html = gr.HTML(_render_plugins_html(), elem_id="plugin-list-html")
+                    plugin_toggle_target = gr.Textbox(value="", elem_id="plugin-toggle-target", elem_classes="bridge-hidden")
+                    plugin_toggle_dispatch = gr.Button("toggle", elem_id="plugin-toggle-dispatch", elem_classes="bridge-hidden")
+                    plugin_delete_targets = gr.Textbox(value="", elem_id="plugin-delete-targets", elem_classes="bridge-hidden")
+                    plugin_delete_dispatch = gr.Button("delete", elem_id="plugin-delete-dispatch", elem_classes="bridge-hidden")
 
             with gr.Column(scale=9, elem_id="right-panel"):
                 with gr.Column(elem_id="chat-area"):
@@ -1012,12 +1293,40 @@ def build_demo() -> gr.Blocks:
         new_chat_btn.click(
             fn=_new_chat,
             inputs=[conversations_state],
-            outputs=[history_html, conversations_state, current_conv_id_state, chatbot, message_box],
+            outputs=[history_html, conversations_state, current_conv_id_state, chatbot, message_box, attachments_html],
+        )
+        install_plugin_btn.click(
+            fn=_install_plugin_file,
+            inputs=[plugin_file],
+            outputs=[plugin_list_html, plugin_file, plugin_status],
+            queue=False,
+            show_progress="hidden",
+        )
+        refresh_plugins_btn.click(
+            fn=_refresh_plugin_panel,
+            inputs=[],
+            outputs=[plugin_list_html, plugin_status],
+            queue=False,
+            show_progress="hidden",
+        )
+        plugin_toggle_dispatch.click(
+            fn=_toggle_plugin_by_name,
+            inputs=[plugin_toggle_target],
+            outputs=[plugin_list_html, plugin_status],
+            queue=False,
+            show_progress="hidden",
+        )
+        plugin_delete_dispatch.click(
+            fn=_remove_plugins_batch,
+            inputs=[plugin_delete_targets],
+            outputs=[plugin_list_html, plugin_status],
+            queue=False,
+            show_progress="hidden",
         )
         history_dispatch.click(
             fn=_handle_history_action,
             inputs=[history_action, history_target, history_payload, conversations_state, current_conv_id_state],
-            outputs=[history_html, conversations_state, current_conv_id_state, chatbot, message_box],
+            outputs=[history_html, conversations_state, current_conv_id_state, chatbot, message_box, attachments_html],
         )
 
     return demo
@@ -1082,6 +1391,23 @@ def main() -> None:
         color: #888;
         font-size: 12px;
     }
+    #plugin-top-btn {
+        position: fixed;
+        right: 16px;
+        top: 12px;
+        z-index: 1200;
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        background: rgba(17, 24, 39, 0.92);
+        color: #e5e7eb;
+        border-radius: 10px;
+        padding: 8px 12px;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+    }
+    #plugin-top-btn:hover {
+        background: rgba(37, 99, 235, 0.22);
+    }
     #main-row {
         flex: 1 1 auto !important;
         height: calc(100vh - 96px) !important;
@@ -1101,6 +1427,7 @@ def main() -> None:
         padding-right: 18px !important;
         display: flex !important;
         flex-direction: column !important;
+        position: relative !important;
         overflow: hidden !important;
     }
     .dark #left-panel {
@@ -1127,8 +1454,16 @@ def main() -> None:
     #history-list {
         flex: 1 1 auto !important;
         min-height: 0 !important;
+        max-height: calc(100vh - 230px) !important;
         overflow-y: auto !important;
-        margin-bottom: 10px !important;
+        margin-bottom: 72px !important;
+    }
+    #new-chat-btn {
+        position: absolute !important;
+        left: 0 !important;
+        right: 18px !important;
+        bottom: 0 !important;
+        z-index: 5 !important;
     }
     .history-list-wrap {
         display: flex;
@@ -1232,6 +1567,135 @@ def main() -> None:
     }
     .history-menu button.danger {
         color: #fca5a5;
+    }
+    #plugin-panel {
+        position: fixed !important;
+        right: 14px !important;
+        top: 56px !important;
+        width: min(380px, calc(100vw - 24px)) !important;
+        max-height: calc(100vh - 80px) !important;
+        overflow-y: auto !important;
+        z-index: 1300 !important;
+        border: 1px solid rgba(148, 163, 184, 0.28) !important;
+        border-radius: 14px !important;
+        background: rgba(15, 23, 42, 0.96) !important;
+        backdrop-filter: blur(6px);
+        padding: 10px !important;
+        box-shadow: 0 14px 40px rgba(0, 0, 0, 0.42) !important;
+        transform: translateX(110%);
+        opacity: 0;
+        pointer-events: none;
+        transition: transform 0.2s ease, opacity 0.2s ease;
+    }
+    #plugin-panel.open {
+        transform: translateX(0);
+        opacity: 1;
+        pointer-events: auto;
+    }
+    .plugin-drawer-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 6px;
+    }
+    .plugin-drawer-title {
+        font-size: 16px;
+        font-weight: 700;
+        color: #f3f4f6;
+    }
+    #plugin-close-btn {
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        background: rgba(31, 41, 55, 0.86);
+        color: #e5e7eb;
+        border-radius: 8px;
+        width: 28px;
+        height: 28px;
+        line-height: 1;
+        font-size: 18px;
+        cursor: pointer;
+    }
+    #plugin-list-html {
+        max-height: 180px;
+        overflow-y: auto;
+    }
+    .plugin-list-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 8px;
+        font-size: 13px;
+        font-weight: 700;
+        color: #e5e7eb;
+    }
+    .plugin-delete-btn {
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        background: rgba(31, 41, 55, 0.85);
+        color: #e5e7eb;
+        border-radius: 8px;
+        padding: 4px 10px;
+        font-size: 12px;
+        cursor: pointer;
+    }
+    .plugin-delete-btn:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+    }
+    .plugin-empty {
+        font-size: 12px;
+        color: #94a3b8;
+        padding: 6px 2px;
+    }
+    .plugin-list {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+    }
+    .plugin-card {
+        border: 1px solid rgba(148, 163, 184, 0.2);
+        border-radius: 10px;
+        padding: 8px 10px;
+        background: rgba(255, 255, 255, 0.02);
+        display: flex;
+        justify-content: flex-start;
+        align-items: center;
+        gap: 8px;
+    }
+    .plugin-check-wrap {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 18px;
+        height: 18px;
+    }
+    .plugin-del-check {
+        width: 14px;
+        height: 14px;
+        margin: 0;
+    }
+    .plugin-name {
+        font-size: 13px;
+        font-weight: 600;
+        color: #e5e7eb;
+        word-break: break-all;
+        flex: 1 1 auto;
+    }
+    .plugin-state {
+        font-size: 11px;
+        color: #e5e7eb;
+        border: 1px solid rgba(148, 163, 184, 0.3);
+        border-radius: 999px;
+        padding: 3px 10px;
+        white-space: nowrap;
+        cursor: pointer;
+        background: rgba(31, 41, 55, 0.8);
+    }
+    .plugin-state.enabled {
+        border-color: rgba(96, 165, 250, 0.55);
+        color: #dbeafe;
+    }
+    .plugin-state.disabled {
+        border-color: rgba(148, 163, 184, 0.35);
+        color: #cbd5e1;
     }
     #chat-window {
         flex: 1 1 0 !important;
