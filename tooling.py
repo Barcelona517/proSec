@@ -7,6 +7,7 @@ from typing import Any, Callable
 import json
 import os
 import re
+import shutil
 import subprocess
 import urllib.error
 import urllib.parse
@@ -40,7 +41,9 @@ class ToolRegistry:
     def __init__(self, root: Path):
         self.root = root
         self._tools: dict[str, Tool] = {}
+        self._skill_instructions: list[str] = []
         self._register_builtin_tools()
+        self._load_skills()
 
     def _register_builtin_tools(self) -> None:
         self.register(
@@ -236,6 +239,162 @@ class ToolRegistry:
             }
             for tool in self._tools.values()
         ]
+
+    def get_skill_instructions(self) -> list[str]:
+        return list(self._skill_instructions)
+
+    def _load_skills(self) -> None:
+        skills_dir = self.root / "skills"
+        if not skills_dir.exists() or not skills_dir.is_dir():
+            return
+        try:
+            from skill_loader import SkillLoader
+            specs = SkillLoader.discover_skills(skills_dir)
+            for spec in specs:
+                for tool in spec.tools:
+                    self.register(tool)
+                if spec.instructions:
+                    self._skill_instructions.append(
+                        f"## Skill: {spec.name} (v{spec.version})\n{spec.instructions}"
+                    )
+        except Exception as exc:
+            print(f"[ToolRegistry] Skill loading failed: {exc}")
+
+    def reload_skills(self) -> dict[str, Any]:
+        """Re-scan the skills/ directory and return a summary."""
+        skills_dir = self.root / "skills"
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        self._skill_instructions.clear()
+        try:
+            from skill_loader import SkillLoader
+            specs = SkillLoader.discover_skills(skills_dir)
+            loaded: list[dict[str, Any]] = []
+            for spec in specs:
+                for tool in spec.tools:
+                    self.register(tool)
+                if spec.instructions:
+                    self._skill_instructions.append(
+                        f"## Skill: {spec.name} (v{spec.version})\n{spec.instructions}"
+                    )
+                loaded.append({
+                    "name": spec.name,
+                    "version": spec.version,
+                    "description": spec.description,
+                    "tools_count": len(spec.tools),
+                })
+            return {"ok": True, "skills": loaded, "total": len(loaded)}
+        except Exception as exc:
+            return {"ok": False, "error": f"重载 Skills 失败: {exc}"}
+
+    def list_skills(self) -> dict[str, Any]:
+        """List installed skills with their tools and details."""
+        skills_dir = self.root / "skills"
+        if not skills_dir.exists() or not skills_dir.is_dir():
+            return {"ok": True, "skills": [], "total": 0}
+        try:
+            from skill_loader import SkillLoader
+            specs = SkillLoader.discover_skills(skills_dir)
+            loaded: list[dict[str, Any]] = []
+            for spec in specs:
+                tool_list = [{"name": t.name.replace(f"{spec.name}.", "", 1), "description": t.description} for t in spec.tools]
+                loaded.append({
+                    "name": spec.name,
+                    "version": spec.version,
+                    "author": spec.author,
+                    "description": spec.description,
+                    "tags": spec.tags,
+                    "tools": tool_list,
+                    "tools_count": len(spec.tools),
+                })
+            return {"ok": True, "skills": loaded, "total": len(loaded)}
+        except Exception as exc:
+            return {"ok": False, "error": f"列出 Skills 失败: {exc}"}
+
+    @staticmethod
+    def delete_skill(skill_name: str, skills_root: Path) -> dict[str, Any]:
+        """Delete an installed skill directory by name."""
+        skill_dir = skills_root / skill_name
+        if not skill_dir.exists() or not skill_dir.is_dir():
+            return {"ok": False, "error": f"Skill '{skill_name}' 不存在"}
+        try:
+            shutil.rmtree(skill_dir)
+            return {"ok": True, "message": f"Skill '{skill_name}' 已删除"}
+        except Exception as exc:
+            return {"ok": False, "error": f"删除 Skill 失败: {exc}"}
+
+    @staticmethod
+    def install_skill_from_zip(zip_bytes: bytes, skills_root: Path) -> dict[str, Any]:
+        """Install a skill from ZIP bytes. ZIP must contain skill.yaml."""
+        if not zipfile.is_zipfile(zip_bytes):
+            return {"ok": False, "error": "上传的文件不是有效的 ZIP 格式"}
+
+        try:
+            with zipfile.ZipFile(zip_bytes) as zf:
+                names = zf.namelist()
+                if not names:
+                    return {"ok": False, "error": "ZIP 文件为空"}
+
+                # Find skill.yaml
+                yaml_entry = None
+                for name in names:
+                    if name.endswith("skill.yaml") and (
+                        name == "skill.yaml" or name.count("/") == 1
+                    ):
+                        yaml_entry = name
+                        break
+                    elif name.endswith("skill.yaml"):
+                        yaml_entry = name
+                        break
+
+                if yaml_entry is None:
+                    return {"ok": False, "error": "ZIP 中没有找到 skill.yaml 文件"}
+
+                # Determine skill directory name
+                if yaml_entry == "skill.yaml":
+                    raw_yaml = zf.read(yaml_entry).decode("utf-8")
+                    try:
+                        import yaml as _yaml
+                        spec_dict = _yaml.safe_load(raw_yaml)
+                        skill_name = str(spec_dict.get("name", "")).strip() if isinstance(spec_dict, dict) else ""
+                    except Exception:
+                        skill_name = ""
+                    if not skill_name:
+                        return {"ok": False, "error": "skill.yaml 中缺少 'name' 字段"}
+                else:
+                    skill_name = yaml_entry.split("/")[0]
+
+                skill_dir = skills_root / skill_name
+                if skill_dir.exists():
+                    import shutil as _shutil
+                    _shutil.rmtree(skill_dir)
+
+                skill_dir.mkdir(parents=True, exist_ok=True)
+
+                # Extract files
+                prefix = "" if yaml_entry == "skill.yaml" else f"{skill_name}/"
+                for name in names:
+                    if name.endswith("/"):
+                        continue
+                    if name == yaml_entry:
+                        rel = name[len(prefix):] if prefix else name
+                    elif name.startswith(prefix):
+                        rel = name[len(prefix):]
+                    else:
+                        continue
+                    target = (skill_dir / rel).resolve()
+                    if not str(target).startswith(str(skill_dir.resolve())):
+                        continue
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(zf.read(name))
+
+                return {
+                    "ok": True,
+                    "skill_name": skill_name,
+                    "message": f"Skill '{skill_name}' 安装成功，已放入 skills/{skill_name}/",
+                }
+
+        except Exception as exc:
+            return {"ok": False, "error": f"安装 Skill 失败: {exc}"}
 
     def execute(self, name: str, raw_arguments: str) -> str:
         if name not in self._tools:

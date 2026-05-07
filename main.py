@@ -96,7 +96,16 @@ def _looks_like_fresh_file_check(user_input: str) -> bool:
 
 
 def _build_messages(user_input: str, history: list[dict]) -> list[dict]:
-    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}] + history
+    system_content = SYSTEM_PROMPT
+    try:
+        tools = ToolRegistry(WORKSPACE_ROOT)
+        skill_instructions = tools.get_skill_instructions()
+        if skill_instructions:
+            system_content += "\n\n## 已加载的技能 (Skills)\n" + "\n\n".join(skill_instructions)
+    except Exception:
+        pass
+
+    messages: list[dict] = [{"role": "system", "content": system_content}] + history
 
     if _looks_like_brief_topic_query(user_input):
         messages.append(

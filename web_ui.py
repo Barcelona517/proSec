@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import datetime
 from html import escape
@@ -871,6 +871,161 @@ def _build_client_script() -> str:
       else bindUi();
     })();
     </script>
+    <script>
+    (() => {
+      const bindSkillsUi = () => {
+        const modal = document.getElementById('skills-modal');
+        const manageBtn = document.getElementById('manage-skills-btn');
+        if (!modal || !manageBtn) {
+          setTimeout(bindSkillsUi, 100);
+          return;
+        }
+
+        if (manageBtn.dataset.bound) return;
+        manageBtn.dataset.bound = '1';
+
+        manageBtn.addEventListener('click', () => {
+          modal.classList.add('open');
+          document.getElementById('tab-install').click();
+        });
+
+        const tabInstall = document.getElementById('tab-install');
+        const tabInstalled = document.getElementById('tab-installed');
+        const contentInstall = document.getElementById('tab-install-content');
+        const contentInstalled = document.getElementById('tab-installed-content');
+
+        tabInstall.addEventListener('click', () => {
+          tabInstall.classList.add('active');
+          tabInstalled.classList.remove('active');
+          contentInstall.classList.add('active');
+          contentInstalled.classList.remove('active');
+        });
+
+        tabInstalled.addEventListener('click', () => {
+          tabInstalled.classList.add('active');
+          tabInstall.classList.remove('active');
+          contentInstalled.classList.add('active');
+          contentInstall.classList.remove('active');
+          loadInstalledSkills();
+        });
+
+        // Drag-drop for ZIP install
+        const dropzone = document.getElementById('skills-dropzone');
+        const fileInput = document.getElementById('skills-file-input');
+
+        dropzone.addEventListener('click', () => fileInput.click());
+        dropzone.addEventListener('dragover', (e) => {
+          e.preventDefault();
+          dropzone.classList.add('dragover');
+        });
+        dropzone.addEventListener('dragleave', () => {
+          dropzone.classList.remove('dragover');
+        });
+        dropzone.addEventListener('drop', (e) => {
+          e.preventDefault();
+          dropzone.classList.remove('dragover');
+          const file = e.dataTransfer.files[0];
+          if (file && file.name.endsWith('.zip')) {
+            uploadSkillZip(file);
+          }
+        });
+
+        fileInput.addEventListener('change', () => {
+          const file = fileInput.files[0];
+          if (file) {
+            uploadSkillZip(file);
+            fileInput.value = '';
+          }
+        });
+      };
+
+      const setTextboxValue = (selector, value) => {
+        const el = document.querySelector(selector);
+        if (!el) return false;
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set
+          || Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+        if (setter) setter.call(el, value);
+        else el.value = value;
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+        return true;
+      };
+
+      window.__uploadSkillZip = (base64Data, fileName) => {
+        setTextboxValue('#skill-action-box textarea, #skill-action-box input', 'install');
+        const payload = JSON.stringify({base64: base64Data, filename: fileName});
+        setTextboxValue('#skill-payload-box textarea, #skill-payload-box input', payload);
+        const btn = document.querySelector('#skill-dispatch button') || document.querySelector('#skill-dispatch');
+        if (btn) btn.click();
+      };
+
+      const uploadSkillZip = async (file) => {
+        const status = document.getElementById('skills-install-status');
+        status.innerHTML = '<div class="skills-install-msg">安装中...</div>';
+        const reader = new FileReader();
+        reader.onload = () => {
+          const base64 = reader.result.split(',')[1];
+          window.__uploadSkillZip(base64, file.name);
+          status.innerHTML = '<div class="skills-install-msg success">安装请求已发送，请稍候刷新页面。</div>';
+        };
+        reader.onerror = () => {
+          status.innerHTML = '<div class="skills-install-msg error">文件读取失败</div>';
+        };
+        reader.readAsDataURL(file);
+      };
+
+      window.__deleteSkill = (skillName) => {
+        if (!confirm('确定删除 Skill "' + skillName + '" 吗？此操作不可撤销。')) return;
+        setTextboxValue('#skill-action-box textarea, #skill-action-box input', 'delete');
+        setTextboxValue('#skill-payload-box textarea, #skill-payload-box input', skillName);
+        const btn = document.querySelector('#skill-dispatch button') || document.querySelector('#skill-dispatch');
+        if (btn) btn.click();
+      };
+
+      window.__loadInstalledSkills = () => loadInstalledSkills();
+
+      const loadInstalledSkills = () => {
+        setTextboxValue('#skill-action-box textarea, #skill-action-box input', 'list');
+        setTextboxValue('#skill-payload-box textarea, #skill-payload-box input', '');
+        const btn = document.querySelector('#skill-dispatch button') || document.querySelector('#skill-dispatch');
+        if (btn) btn.click();
+      };
+
+      const renderSkillsList = (skills) => {
+        const container = document.getElementById('skills-list-container');
+        if (!container) return;
+
+        if (!skills || skills.length === 0) {
+          container.innerHTML = '<div class="skills-empty">暂无已安装的 Skill</div>';
+          return;
+        }
+
+        let html = '<div class="skills-list">';
+        skills.forEach(s => {
+          html += '<div class="skill-card">';
+          html += '<div class="skill-card-info">';
+          html += '<div class="skill-card-name">' + (s.name || '') + '</div>';
+          html += '<div class="skill-card-meta">v' + (s.version || '?') + ' — ' + (s.description || '') + '</div>';
+          html += '<div class="skill-card-tools">';
+          html += '工具: ' + (s.tools_count || 0);
+          if (s.tools && s.tools.length > 0) {
+            html += ' (' + s.tools.map(t => t.name).join(', ') + ')';
+          }
+          html += '</div>';
+          html += '</div>';
+          html += '<button class="skill-card-delete" onclick="window.__deleteSkill(\'' + (s.name || '') + '\')">删除</button>';
+          html += '</div>';
+        });
+        html += '</div>';
+        container.innerHTML = html;
+      };
+
+      window.__renderSkillsList = renderSkillsList;
+
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bindSkillsUi);
+      else bindSkillsUi();
+    })();
+    </script>
     """
 
 
@@ -884,10 +1039,42 @@ def build_demo() -> gr.Blocks:
         gr.HTML(
             """
             <div class="header-wrap">
-              <div class="page-title">pre OpenClaw</div>
-              <div class="page-meta">工作目录: """
+              <div class="header-top-row">
+                <div class="header-left">
+                  <div class="page-title">pre OpenClaw</div>
+                  <div class="page-meta">工作目录: """
             + escape(str(WORKSPACE_ROOT))
             + """</div>
+                </div>
+                <button id="manage-skills-btn" class="manage-skills-btn" type="button">⚙ 管理 Skills</button>
+              </div>
+            </div>
+            <div id="skills-modal" class="skills-modal">
+              <div class="skills-modal-backdrop" onclick="document.getElementById('skills-modal').classList.remove('open')"></div>
+              <div class="skills-modal-content">
+                <div class="skills-modal-header">
+                  <span class="skills-modal-title">管理 Skills</span>
+                  <button class="skills-modal-close" onclick="document.getElementById('skills-modal').classList.remove('open')">×</button>
+                </div>
+                <div class="skills-modal-tabs">
+                  <button id="tab-install" class="skills-tab active">安装</button>
+                  <button id="tab-installed" class="skills-tab">已安装</button>
+                </div>
+                <div id="tab-install-content" class="skills-tab-content active">
+                  <div class="skills-dropzone" id="skills-dropzone">
+                    <div class="skills-dropzone-icon">📦</div>
+                    <div class="skills-dropzone-text">拖拽 Skill ZIP 文件到此处</div>
+                    <div class="skills-dropzone-hint">或点击选择文件</div>
+                    <input type="file" id="skills-file-input" accept=".zip" style="display:none" />
+                  </div>
+                  <div class="skills-install-status" id="skills-install-status"></div>
+                </div>
+                <div id="tab-installed-content" class="skills-tab-content">
+                  <div class="skills-list-container" id="skills-list-container">
+                    <div class="skills-loading">加载中...</div>
+                  </div>
+                </div>
+              </div>
             </div>
             """
         )
@@ -967,6 +1154,10 @@ def build_demo() -> gr.Blocks:
         history_target = gr.Textbox(value="", elem_id="history-target-box", elem_classes="bridge-hidden")
         history_payload = gr.Textbox(value="", elem_id="history-payload-box", elem_classes="bridge-hidden")
         history_dispatch = gr.Button("dispatch", elem_id="history-dispatch", elem_classes="bridge-hidden")
+
+        skill_action_box = gr.Textbox(value="", elem_id="skill-action-box", elem_classes="bridge-hidden")
+        skill_payload_box = gr.Textbox(value="", elem_id="skill-payload-box", elem_classes="bridge-hidden")
+        skill_dispatch = gr.Button("dispatch", elem_id="skill-dispatch", elem_classes="bridge-hidden")
         send_btn.click(
             fn=_submit_message_stream,
             inputs=[message_box, pending_image_state, pending_files_state, image_editor, chatbot, conversations_state, current_conv_id_state],
@@ -1019,8 +1210,123 @@ def build_demo() -> gr.Blocks:
             inputs=[history_action, history_target, history_payload, conversations_state, current_conv_id_state],
             outputs=[history_html, conversations_state, current_conv_id_state, chatbot, message_box],
         )
-
+        skill_dispatch.click(
+            fn=_skill_dispatch,
+            inputs=[skill_action_box, skill_payload_box],
+            outputs=[skill_payload_box, skill_action_box],
+            js="""
+            async (result, action) => {
+              if (action === 'list' || action === 'refresh') {
+                try {
+                  const skills = JSON.parse(result);
+                  if (window.__renderSkillsList) {
+                    window.__renderSkillsList(skills);
+                  } else {
+                    setTimeout(() => {
+                      if (window.__renderSkillsList) window.__renderSkillsList(skills);
+                    }, 300);
+                  }
+                } catch(e) {}
+              } else if (action === 'install') {
+                try {
+                  const data = JSON.parse(result);
+                  const status = document.getElementById('skills-install-status');
+                  if (status) {
+                    if (data.ok === false) {
+                      status.innerHTML = '<div class="skills-install-msg error">' + (data.error || '安装失败') + '</div>';
+                    } else {
+                      status.innerHTML = '<div class="skills-install-msg success">安装成功! 请刷新已安装列表查看。</div>';
+                    }
+                  }
+                } catch(e) {}
+              } else if (action === 'delete') {
+                try {
+                  const data = JSON.parse(result);
+                  if (data.ok) {
+                    window.__loadInstalledSkills();
+                  }
+                } catch(e) {}
+              }
+              return [result, action];
+            }
+            """,
+        )
     return demo
+
+_registry = ToolRegistry(WORKSPACE_ROOT)
+
+
+def _skill_dispatch(
+    action: str,
+    payload: str,
+) -> tuple[str, str]:
+    """Handle skill management: list, install, delete."""
+    action = (action or "").strip()
+    payload = (payload or "").strip()
+    if action == "list":
+        try:
+            result = _registry.list_skills()
+            skills = result.get("skills", [])
+            return json.dumps(skills, ensure_ascii=False), action
+        except Exception as e:
+            return json.dumps({"error": str(e)}), action
+    elif action == "delete":
+        try:
+            result = _registry.delete_skill(payload)
+            msg = result.get("message", result.get("ok", "") and "已删除" or "删除失败")
+            return json.dumps({"ok": True, "message": msg, "name": payload}), action
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)}), action
+    elif action == "install":
+        try:
+            data = json.loads(payload)
+            base64_data = data.get("base64", "")
+            filename = data.get("filename", "unknown.zip")
+            import base64
+            zip_bytes = base64.b64decode(base64_data)
+            result = ToolRegistry.install_skill_from_zip(zip_bytes, WORKSPACE_ROOT)
+            if result.get("ok"):
+                reload_result = _registry.reload_skills()
+                skills_list = json.dumps(reload_result.get("skills", []), ensure_ascii=False)
+                msg = result.get("message", "安装成功")
+                print(f"[Skill Install] {msg}")
+                return skills_list, "refresh"
+            else:
+                return json.dumps({"ok": False, "error": result.get("error", "未知错误")}), action
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)}), action
+    return json.dumps([]), action
+
+
+def _install_skill(zip_file: str | None, conversations: list[dict] | None, current_conv_id: str) -> tuple[str, list[dict], str]:
+    """Handle ZIP file upload: extract to skills/ and reload."""
+    convs = [_normalize_conversation(c) for c in list(conversations or [])]
+    if not convs:
+        convs, current_conv_id = _load_or_init_conversations()
+    if not zip_file:
+        return _render_history_sidebar(convs, current_conv_id), convs, current_conv_id
+
+    try:
+        with open(zip_file, "rb") as f:
+            zip_bytes = f.read()
+        from tooling import ToolRegistry
+        result = ToolRegistry.install_skill_from_zip(zip_bytes, WORKSPACE_ROOT)
+        if result.get("ok"):
+            msg = result.get("message", "安装成功")
+            reload_result = _registry.reload_skills()
+            if reload_result.get("ok"):
+                skills_info = ", ".join(
+                    f"{s['name']} v{s['version']}" for s in reload_result.get("skills", [])
+                ) or "无"
+                msg += f"\n已加载 Skills: {skills_info}"
+            print(f"[Skill Install] {msg}")
+        else:
+            msg = f"安装失败: {result.get('error', '未知错误')}"
+    except Exception as exc:
+        msg = f"安装 Skill 时出错: {exc}"
+
+    return _render_history_sidebar(convs, current_conv_id), convs, current_conv_id
+
 
 def _is_port_available(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -1659,6 +1965,213 @@ def main() -> None:
         line-height: 28px;
         text-align: center;
         box-shadow: 0 6px 16px rgba(0, 0, 0, 0.28);
+    }
+    /* ===== Skills Management Modal Styles ===== */
+    .header-top-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+    }
+    .header-left {
+        flex: 1;
+        min-width: 0;
+    }
+    .manage-skills-btn {
+        flex-shrink: 0;
+        padding: 6px 14px;
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        border-radius: 999px;
+        background: rgba(31, 35, 43, 0.6);
+        color: #e5e7eb;
+        font-size: 13px;
+        cursor: pointer;
+        transition: background 0.2s, border-color 0.2s;
+    }
+    .manage-skills-btn:hover {
+        background: rgba(59, 130, 246, 0.15);
+        border-color: rgba(96, 165, 250, 0.45);
+    }
+    .skills-modal {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 200;
+    }
+    .skills-modal.open {
+        display: block;
+    }
+    .skills-modal-backdrop {
+        position: absolute;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.55);
+    }
+    .skills-modal-content {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: 480px;
+        max-width: 92vw;
+        max-height: 80vh;
+        border-radius: 16px;
+        border: 1px solid rgba(148, 163, 184, 0.22);
+        background: #1a1c22;
+        box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+    }
+    .skills-modal-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 12px 16px;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+    }
+    .skills-modal-title {
+        font-size: 16px;
+        font-weight: 700;
+    }
+    .skills-modal-close {
+        border: 0;
+        background: transparent;
+        color: #94a3b8;
+        font-size: 22px;
+        line-height: 1;
+        cursor: pointer;
+        width: 32px;
+        height: 32px;
+        border-radius: 8px;
+    }
+    .skills-modal-close:hover {
+        background: rgba(148, 163, 184, 0.1);
+    }
+    .skills-modal-tabs {
+        display: flex;
+        gap: 0;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+        padding: 0 16px;
+    }
+    .skills-tab {
+        padding: 8px 16px;
+        border: 0;
+        background: transparent;
+        color: #94a3b8;
+        font-size: 13px;
+        cursor: pointer;
+        border-bottom: 2px solid transparent;
+        transition: color 0.2s, border-color 0.2s;
+    }
+    .skills-tab.active {
+        color: #e5e7eb;
+        border-bottom-color: #60a5fa;
+    }
+    .skills-tab-content {
+        display: none;
+        padding: 16px;
+        overflow-y: auto;
+        flex: 1;
+        min-height: 200px;
+    }
+    .skills-tab-content.active {
+        display: block;
+    }
+    .skills-dropzone {
+        border: 2px dashed rgba(148, 163, 184, 0.35);
+        border-radius: 14px;
+        padding: 32px 16px;
+        text-align: center;
+        cursor: pointer;
+        transition: border-color 0.2s, background 0.2s;
+    }
+    .skills-dropzone:hover, .skills-dropzone.dragover {
+        border-color: #60a5fa;
+        background: rgba(59, 130, 246, 0.06);
+    }
+    .skills-dropzone-icon {
+        font-size: 36px;
+        margin-bottom: 8px;
+    }
+    .skills-dropzone-text {
+        font-size: 14px;
+        font-weight: 600;
+        margin-bottom: 4px;
+    }
+    .skills-dropzone-hint {
+        font-size: 12px;
+        color: #94a3b8;
+    }
+    .skills-install-status {
+        margin-top: 10px;
+        font-size: 13px;
+    }
+    .skills-install-msg {
+        padding: 8px 12px;
+        border-radius: 8px;
+        background: rgba(59, 130, 246, 0.1);
+        color: #93c5fd;
+    }
+    .skills-install-msg.success {
+        background: rgba(34, 197, 94, 0.1);
+        color: #86efac;
+    }
+    .skills-install-msg.error {
+        background: rgba(239, 68, 68, 0.1);
+        color: #fca5a5;
+    }
+    .skills-list {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+    }
+    .skill-card {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 10px 12px;
+        border: 1px solid rgba(148, 163, 184, 0.15);
+        border-radius: 12px;
+        background: rgba(31, 35, 43, 0.4);
+        gap: 10px;
+    }
+    .skill-card-info {
+        flex: 1;
+        min-width: 0;
+    }
+    .skill-card-name {
+        font-size: 14px;
+        font-weight: 700;
+        margin-bottom: 2px;
+    }
+    .skill-card-meta {
+        font-size: 12px;
+        color: #94a3b8;
+        margin-bottom: 2px;
+    }
+    .skill-card-tools {
+        font-size: 11px;
+        color: #6b7280;
+    }
+    .skill-card-delete {
+        flex-shrink: 0;
+        padding: 4px 10px;
+        border: 1px solid rgba(239, 68, 68, 0.3);
+        border-radius: 8px;
+        background: rgba(239, 68, 68, 0.08);
+        color: #fca5a5;
+        font-size: 12px;
+        cursor: pointer;
+        transition: background 0.2s;
+    }
+    .skill-card-delete:hover {
+        background: rgba(239, 68, 68, 0.18);
+    }
+    .skills-empty, .skills-loading {
+        text-align: center;
+        padding: 24px;
+        color: #6b7280;
+        font-size: 13px;
     }
     """)
 
