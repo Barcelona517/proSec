@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-import importlib.util
 from pathlib import Path
 from typing import Any, Callable
 import json
@@ -41,39 +40,7 @@ class ToolRegistry:
     def __init__(self, root: Path):
         self.root = root
         self._tools: dict[str, Tool] = {}
-        self._loaded_plugins: list[str] = []
-        self._plugin_errors: list[str] = []
         self._register_builtin_tools()
-        self._load_plugins()
-
-    def _load_plugins(self) -> None:
-        plugin_dir = (self.root / "tools_plugins").resolve()
-        if not plugin_dir.exists() or not plugin_dir.is_dir():
-            return
-
-        enabled = os.getenv("ENABLED_TOOL_PLUGINS", "").strip()
-        enabled_set = {x.strip() for x in enabled.split(",") if x.strip()} if enabled else None
-
-        for plugin_file in sorted(plugin_dir.glob("*.py"), key=lambda p: p.name.lower()):
-            if plugin_file.name.startswith("_"):
-                continue
-            plugin_name = plugin_file.stem
-            if enabled_set is not None and plugin_name not in enabled_set:
-                continue
-            try:
-                module_name = f"tools_plugins_{plugin_name}"
-                spec = importlib.util.spec_from_file_location(module_name, str(plugin_file))
-                if spec is None or spec.loader is None:
-                    raise ToolExecutionError("failed to build import spec")
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
-                register_fn = getattr(module, "register_tools", None)
-                if not callable(register_fn):
-                    raise ToolExecutionError("missing callable register_tools(registry)")
-                register_fn(self)
-                self._loaded_plugins.append(plugin_name)
-            except Exception as exc:  # noqa: BLE001
-                self._plugin_errors.append(f"{plugin_name}: {exc}")
 
     def _register_builtin_tools(self) -> None:
         self.register(
@@ -269,12 +236,6 @@ class ToolRegistry:
             }
             for tool in self._tools.values()
         ]
-
-    def plugin_status(self) -> dict[str, Any]:
-        return {
-            "loaded_plugins": list(self._loaded_plugins),
-            "plugin_errors": list(self._plugin_errors),
-        }
 
     def execute(self, name: str, raw_arguments: str) -> str:
         if name not in self._tools:

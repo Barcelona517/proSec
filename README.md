@@ -10,7 +10,7 @@
 - 提供本地工具执行与基本安全隔离
 - 支持对话历史持久化
 - 提供 Web 聊天界面
-- 扩展实现了文件解析、视觉识图、工具插件化、流式输出等能力
+- 扩展实现了文件解析、视觉识图、流式输出等能力
 
 ## 项目目录
 
@@ -28,8 +28,6 @@ proSec/
 ├─ chat_history.json
 ├─ OpenClaw 个人 Mini 实现-作业2.docx
 ├─ _docx_extracted.txt
-├─ tools_plugins/
-│  └─ sample_notify_plugin.py
 ├─ uploads/
 │  └─ ... 上传的图片/文档缓存
 ├─ web_ui.log
@@ -71,7 +69,6 @@ proSec/
   - `ToolRegistry`
   - 工具注册 / 执行 / 参数解析
   - 路径安全检查
-  - 插件动态加载
 
 - [vision_agent.py](/c:/Users/tyy86/Desktop/proSec/vision_agent.py)
   负责图片输入：
@@ -84,7 +81,6 @@ proSec/
   - 多会话历史管理
   - 文件/图片上传
   - 流式回答显示
-  - 插件中心 UI
 
 ### 配置与依赖
 
@@ -122,14 +118,6 @@ proSec/
 
 - [check_prime.py](/c:/Users/tyy86/Desktop/proSec/check_prime.py)
   独立的小测试脚本，不属于主实现链路。
-
-### 插件目录
-
-- [tools_plugins](/c:/Users/tyy86/Desktop/proSec/tools_plugins)
-  工具插件目录，支持无需修改核心代码，动态添加新工具。
-
-- [sample_notify_plugin.py](/c:/Users/tyy86/Desktop/proSec/tools_plugins/sample_notify_plugin.py)
-  示例插件，实现了一个简单的本地笔记追加工具。
 
 ## 当前已实现的工具
 
@@ -177,7 +165,6 @@ proSec/
 - 重命名 / 置顶 / 删除历史会话
 - 图片上传并交给视觉模型分析
 - 文件上传并自动抽取内容
-- 插件中心（上传 `.py` / `.zip` 插件）
 
 ## 运行方式
 
