@@ -11,6 +11,7 @@ import socket
 import urllib.parse
 import zipfile
 from uuid import uuid4
+from typing import Any
 
 import gradio as gr
 
@@ -316,21 +317,20 @@ def _load_or_init_conversations() -> tuple[list[dict], str]:
                     if isinstance(c, dict) and _conversation_has_messages(c)
                 ]
                 if convs:
-                    new_conv = _new_conversation([])
-                    convs.append(new_conv)
-                    active_id = new_conv["id"]
+                    active_id = str(data.get("active_id") or convs[0]["id"])
+                    if not any(str(conv.get("id")) == active_id for conv in convs):
+                        active_id = str(convs[0]["id"])
                     return convs, active_id
         except json.JSONDecodeError:
             pass
 
     old_messages = load_history(HISTORY_FILE)
-    conversations: list[dict] = []
     if old_messages:
-        conversations.append(_new_conversation(old_messages))
+        first = _new_conversation(old_messages)
+        return [first], first["id"]
 
     fresh = _new_conversation([])
-    conversations.append(fresh)
-    return conversations, fresh["id"]
+    return [fresh], fresh["id"]
 
 
 def _render_history_sidebar(conversations: list[dict], active_id: str) -> str:
@@ -626,6 +626,39 @@ def _history_to_chat_messages(agent_history: list[dict]) -> list[dict[str, str]]
     return chat_messages
 
 
+def _render_chat_empty_state(visible: bool) -> str:
+    cls = "chat-empty-state visible" if visible else "chat-empty-state"
+    return (
+        f"<div class='{cls}'>"
+        "<div class='chat-empty-state-title'>pre OpenClaw</div>"
+        "</div>"
+    )
+
+
+def _build_user_history_content(user_message: str, image_path: str | None, file_paths: list[str]) -> str:
+    parts: list[str] = []
+    text = (user_message or "").strip()
+    if text:
+        parts.append(text)
+    if image_path:
+        parts.append(f"[图片] {image_path}")
+    for rel in file_paths:
+        parts.append(f"[文件] {rel}")
+    return "\n".join(parts).strip()
+
+
+def _replace_last_user_message(messages: list[dict], content: str) -> list[dict]:
+    updated = list(messages)
+    for idx in range(len(updated) - 1, -1, -1):
+        item = updated[idx]
+        if isinstance(item, dict) and item.get("role") == "user":
+            updated[idx] = {**item, "content": content}
+            return updated
+    if content:
+        updated.append({"role": "user", "content": content})
+    return updated
+
+
 def _submit_message(
     user_message: str,
     pending_image: str | None,
@@ -657,6 +690,7 @@ def _submit_message(
             None,
             [],
             _render_attachment_strip(None, []),
+            _render_chat_empty_state(not bool(agent_history)),
             _render_history_sidebar(convs, current_conv_id),
         )
 
@@ -672,9 +706,7 @@ def _submit_message(
                 for rel, fmt, content in previews:
                     prompt += f"\n---\n文件: {rel}\n格式: {fmt or 'text'}\n内容:\n{content}"
             answer = run_vision_agent(prompt, final_image_path, mode="auto")
-            user_content = f"{prompt}\n[图片] {final_image_path}"
-            for rel in staged_file_rels:
-                user_content += f"\n[文件] {rel}"
+            user_content = _build_user_history_content(user_message, final_image_path, staged_file_rels)
             new_agent_history = list(agent_history) + [
                 {"role": "user", "content": user_content},
                 {"role": "assistant", "content": answer},
@@ -691,33 +723,29 @@ def _submit_message(
             thoughts = [str(s.get("thought", "")).strip() for s in trace_steps if str(s.get("thought", "")).strip()]
             thought_text = "\n".join(thoughts)
 
+        user_content = _build_user_history_content(user_message, final_image_path, selected_file_paths)
+        new_agent_history = _replace_last_user_message(new_agent_history, user_content)
+
         current_conv["messages"] = new_agent_history
         if current_conv.get("title") in {"", "新对话"} or len(agent_history) == 0:
             current_conv["title"] = _make_title_from_messages(new_agent_history)
         current_conv["updated_at"] = _now_iso()
         _persist_conversations(convs, current_conv_id)
 
-        user_display = user_message
-        if selected_file_paths:
-            user_display = f"{user_display}\n\n{_build_uploaded_files_html(selected_file_paths)}"
-        if final_image_path:
-            user_display = f"{user_display}\n\n{_build_uploaded_image_html(final_image_path)}"
+        user_display = _render_history_user_message(user_content)
         ui_messages.append({"role": "user", "content": user_display})
         plan_cards = _render_trace_cards(trace_steps)
         assistant_content = _format_assistant_content(thought_text, answer)
         if plan_cards:
             assistant_content = plan_cards + assistant_content
         ui_messages.append({"role": "assistant", "content": assistant_content})
-        return ui_messages, convs, current_conv_id, "", None, None, None, [], _render_attachment_strip(None, []), _render_history_sidebar(convs, current_conv_id)
+        return ui_messages, convs, current_conv_id, "", None, None, None, [], _render_attachment_strip(None, []), _render_chat_empty_state(False), _render_history_sidebar(convs, current_conv_id)
     except Exception as exc:  # noqa: BLE001
-        user_display = user_message
-        if selected_file_paths:
-            user_display = f"{user_display}\n\n{_build_uploaded_files_html(selected_file_paths)}"
-        if final_image_path:
-            user_display = f"{user_display}\n\n{_build_uploaded_image_html(final_image_path)}"
+        user_content = _build_user_history_content(user_message, final_image_path, selected_file_paths)
+        user_display = _render_history_user_message(user_content)
         ui_messages.append({"role": "user", "content": user_display})
         ui_messages.append({"role": "assistant", "content": _format_assistant_content("", f"Agent Error: {exc}")})
-        return ui_messages, convs, current_conv_id, "", None, None, None, [], _render_attachment_strip(None, []), _render_history_sidebar(convs, current_conv_id)
+        return ui_messages, convs, current_conv_id, "", None, None, None, [], _render_attachment_strip(None, []), _render_chat_empty_state(False), _render_history_sidebar(convs, current_conv_id)
 
 
 def _submit_message_stream(
@@ -750,19 +778,17 @@ def _submit_message_stream(
             None,
             [],
             _render_attachment_strip(None, []),
+            _render_chat_empty_state(not bool(agent_history)),
             _render_history_sidebar(convs, current_conv_id),
         )
         return
 
     thinking_messages = list(chat_messages or [])
-    user_display = user_message
-    if selected_file_paths:
-        user_display = f"{user_display}\n\n{_build_uploaded_files_html([Path(p).name for p in selected_file_paths])}"
-    if final_image_path:
-        user_display = f"{user_display}\n\n{_build_uploaded_image_html(final_image_path)}"
+    user_content = _build_user_history_content(user_message, final_image_path, selected_file_paths)
+    user_display = _render_history_user_message(user_content)
     thinking_messages.append({"role": "user", "content": user_display})
     thinking_messages.append({"role": "assistant", "content": "<div class='ai-thinking'>思考中...</div>"})
-    yield thinking_messages, convs, current_conv_id, user_message, None, None, final_image_path, selected_file_paths, _render_attachment_strip(final_image_path, selected_file_paths), _render_history_sidebar(convs, current_conv_id)
+    yield thinking_messages, convs, current_conv_id, user_message, None, None, final_image_path, selected_file_paths, _render_attachment_strip(final_image_path, selected_file_paths), _render_chat_empty_state(False), _render_history_sidebar(convs, current_conv_id)
 
     if final_image_path:
         # Vision path keeps existing non-stream flow.
@@ -800,6 +826,7 @@ def _submit_message_stream(
                     final_image_path,
                     selected_file_paths,
                     _render_attachment_strip(final_image_path, selected_file_paths),
+                    _render_chat_empty_state(False),
                     _render_history_sidebar(convs, current_conv_id),
                 )
             elif event.get("type") == "final":
@@ -807,15 +834,15 @@ def _submit_message_stream(
                 new_agent_history = list(event.get("history", []) or [])
                 trace_steps = list(event.get("trace_steps", []) or [])
 
+        new_agent_history = _replace_last_user_message(new_agent_history, user_content)
+
         current_conv["messages"] = new_agent_history
         if current_conv.get("title") in {"", "新对话"} or len(agent_history) == 0:
             current_conv["title"] = _make_title_from_messages(new_agent_history)
         current_conv["updated_at"] = _now_iso()
         _persist_conversations(convs, current_conv_id)
 
-        user_display = user_message
-        if selected_file_paths:
-            user_display = f"{user_display}\n\n{_build_uploaded_files_html(selected_file_paths)}"
+        user_display = _render_history_user_message(user_content)
         ui_messages.append({"role": "user", "content": user_display})
         assistant_content = _format_assistant_content("", final_answer or stream_text)
         plan_cards = _render_trace_cards(trace_steps)
@@ -832,13 +859,13 @@ def _submit_message_stream(
             None,
             [],
             _render_attachment_strip(None, []),
+            _render_chat_empty_state(False),
             _render_history_sidebar(convs, current_conv_id),
         )
     except Exception as exc:  # noqa: BLE001
         err_msgs = list(ui_messages)
-        user_display = user_message
-        if selected_file_paths:
-            user_display = f"{user_display}\n\n{_build_uploaded_files_html(selected_file_paths)}"
+        user_content = _build_user_history_content(user_message, final_image_path, selected_file_paths)
+        user_display = _render_history_user_message(user_content)
         err_msgs.append({"role": "user", "content": user_display})
         err_msgs.append({"role": "assistant", "content": _format_assistant_content("", f"Agent Error: {exc}")})
         yield (
@@ -851,6 +878,7 @@ def _submit_message_stream(
             None,
             [],
             _render_attachment_strip(None, []),
+            _render_chat_empty_state(False),
             _render_history_sidebar(convs, current_conv_id),
         )
 
@@ -874,11 +902,13 @@ def _handle_history_action(
         selected = _find_conversation(convs, target_id)
         active_id = str(selected["id"])
         save_history(HISTORY_FILE, selected.get("messages", []))
-        return _render_history_sidebar(convs, active_id), convs, active_id, _history_to_chat_messages(selected.get("messages", [])), "", _render_attachment_strip(None, [])
+        chat_messages = _history_to_chat_messages(selected.get("messages", []))
+        return _render_history_sidebar(convs, active_id), convs, active_id, chat_messages, "", _render_attachment_strip(None, []), _render_chat_empty_state(not bool(chat_messages))
 
     if not target_id:
         active = _find_conversation(convs, current_conv_id)
-        return _render_history_sidebar(convs, current_conv_id), convs, current_conv_id, _history_to_chat_messages(active.get("messages", [])), "", _render_attachment_strip(None, [])
+        chat_messages = _history_to_chat_messages(active.get("messages", []))
+        return _render_history_sidebar(convs, current_conv_id), convs, current_conv_id, chat_messages, "", _render_attachment_strip(None, []), _render_chat_empty_state(not bool(chat_messages))
 
     conv = _find_conversation(convs, target_id)
     if action == "rename":
@@ -901,7 +931,8 @@ def _handle_history_action(
         _persist_conversations(convs, current_conv_id)
 
     active = _find_conversation(convs, current_conv_id)
-    return _render_history_sidebar(convs, current_conv_id), convs, current_conv_id, _history_to_chat_messages(active.get("messages", [])), "", _render_attachment_strip(None, [])
+    chat_messages = _history_to_chat_messages(active.get("messages", []))
+    return _render_history_sidebar(convs, current_conv_id), convs, current_conv_id, chat_messages, "", _render_attachment_strip(None, []), _render_chat_empty_state(not bool(chat_messages))
 
 
 def _new_chat(conversations: list[dict]) -> tuple[str, list[dict], str, list[dict[str, str]], str, str]:
@@ -913,7 +944,7 @@ def _new_chat(conversations: list[dict]) -> tuple[str, list[dict], str, list[dic
     conv = _new_conversation([])
     convs.append(conv)
     active_id = conv["id"]
-    return _render_history_sidebar(convs, active_id), convs, active_id, [], "", _render_attachment_strip(None, [])
+    return _render_history_sidebar(convs, active_id), convs, active_id, [], "", _render_attachment_strip(None, []), _render_chat_empty_state(True)
 
 
 def _build_client_script() -> str:
@@ -1229,6 +1260,7 @@ def build_demo() -> gr.Blocks:
 
             with gr.Column(scale=9, elem_id="right-panel"):
                 with gr.Column(elem_id="chat-area"):
+                    chat_empty_state = gr.HTML(_render_chat_empty_state(not bool(initial_chat_messages)), elem_id="chat-empty-state")
                     chatbot = gr.Chatbot(
                         value=initial_chat_messages,
                         buttons=["copy"],
@@ -1299,7 +1331,7 @@ def build_demo() -> gr.Blocks:
         send_btn.click(
             fn=_submit_message_stream,
             inputs=[message_box, pending_image_state, pending_files_state, image_editor, chatbot, conversations_state, current_conv_id_state],
-            outputs=[chatbot, conversations_state, current_conv_id_state, message_box, image_box, file_box, pending_image_state, pending_files_state, attachments_html, history_html],
+            outputs=[chatbot, conversations_state, current_conv_id_state, message_box, image_box, file_box, pending_image_state, pending_files_state, attachments_html, chat_empty_state, history_html],
         )
         file_box.change(
             fn=_add_files_to_pending,
@@ -1341,7 +1373,7 @@ def build_demo() -> gr.Blocks:
         new_chat_btn.click(
             fn=_new_chat,
             inputs=[conversations_state],
-            outputs=[history_html, conversations_state, current_conv_id_state, chatbot, message_box, attachments_html],
+            outputs=[history_html, conversations_state, current_conv_id_state, chatbot, message_box, attachments_html, chat_empty_state],
         )
         install_plugin_btn.click(
             fn=_install_plugin_file,
@@ -1374,7 +1406,7 @@ def build_demo() -> gr.Blocks:
         history_dispatch.click(
             fn=_handle_history_action,
             inputs=[history_action, history_target, history_payload, conversations_state, current_conv_id_state],
-            outputs=[history_html, conversations_state, current_conv_id_state, chatbot, message_box, attachments_html],
+            outputs=[history_html, conversations_state, current_conv_id_state, chatbot, message_box, attachments_html, chat_empty_state],
         )
 
     return demo
@@ -1498,6 +1530,28 @@ def main() -> None:
         display: flex !important;
         flex-direction: column !important;
         overflow: hidden !important;
+        position: relative !important;
+    }
+    #chat-empty-state {
+        position: absolute !important;
+        inset: 0 !important;
+        display: none !important;
+        align-items: center !important;
+        justify-content: center !important;
+        pointer-events: none !important;
+        z-index: 3 !important;
+        text-align: center !important;
+    }
+    #chat-empty-state.visible {
+        display: flex !important;
+    }
+    .chat-empty-state-title {
+        color: #9ca3af;
+        font-size: 22px;
+        font-weight: 600;
+        letter-spacing: 0.03em;
+        line-height: 1.2;
+        text-shadow: 0 1px 0 rgba(0, 0, 0, 0.18);
     }
     #history-list {
         flex: 1 1 auto !important;

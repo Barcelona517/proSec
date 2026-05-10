@@ -255,8 +255,13 @@ def run_agent_stream_with_trace(user_input: str, history: list[dict]) -> Iterato
             print(f"Thought/Reply: {thought}")
 
         tool_calls = [
-            {"id": v["id"], "function": {"name": v["name"], "arguments": v["arguments"]}}
-            for _, v in sorted(tool_call_buf.items(), key=lambda kv: kv[0])
+            {
+                "id": v["id"],
+                "type": "function",
+                "index": idx,
+                "function": {"name": v["name"], "arguments": v["arguments"]},
+            }
+            for idx, v in sorted(tool_call_buf.items(), key=lambda kv: kv[0])
             if v["name"]
         ]
 
