@@ -7,6 +7,7 @@ from typing import Any, Iterator
 
 from config import HISTORY_FILE, MAX_TURNS, MODEL_NAME, SYSTEM_PROMPT, WORKSPACE_ROOT
 from llm_client import build_client
+from skill_manager import build_skill_prompt
 from tooling import ToolExecutionError, ToolRegistry
 
 
@@ -117,6 +118,19 @@ def _build_messages(user_input: str, history: list[dict]) -> list[dict]:
                 "content": (
                     "这次问题涉及文件或目录的当前状态。"
                     "你必须重新调用本地文件工具做实时检查，不能直接引用旧对话里之前看到的文件列表或旧结论。"
+                ),
+            }
+        )
+
+    skill_prompt = build_skill_prompt(user_input)
+    if skill_prompt:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "以下是当前可用的 skill 目录和按需展开后的 skill 内容。"
+                    "当用户意图命中时，请严格遵循对应 skill：\n"
+                    + skill_prompt
                 ),
             }
         )

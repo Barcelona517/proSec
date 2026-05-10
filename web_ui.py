@@ -16,6 +16,7 @@ import gradio as gr
 
 from config import HISTORY_FILE, MODEL_NAME, VISION_MODEL, WORKSPACE_ROOT
 from main import load_history, run_agent_stream_with_trace, run_agent_with_trace, save_history
+from skill_manager import import_skill_bundle, render_skill_catalog_html, scan_skills
 from tooling import ToolRegistry
 from vision_agent import run_vision_agent
 
@@ -49,6 +50,8 @@ READABLE_FILE_TYPES = {
     ".jpeg",
     ".webp",
 }
+
+INITIAL_SKILLS = scan_skills()
 
 def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
@@ -453,6 +456,28 @@ def _render_chat_empty_state(visible: bool) -> str:
     )
 
 
+def _refresh_skill_panel() -> tuple[str, str, Any]:
+    skills = scan_skills()
+    return render_skill_catalog_html(skills), f"已加载 {len(skills)} 个 skill。", gr.update(value=None)
+
+
+def _import_skill_folder(file_input: Any) -> tuple[str, str, Any]:
+    paths = _normalize_file_paths(file_input)
+    if not paths:
+        return render_skill_catalog_html(), "请先选择一个 skill 文件夹。", gr.update(value=None)
+
+    try:
+        folder, record = import_skill_bundle(paths)
+        skills = scan_skills()
+        return (
+            render_skill_catalog_html(skills),
+            f"已导入 skill：{record.name}，位置：{folder.relative_to(WORKSPACE_ROOT).as_posix()}",
+            gr.update(value=None),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return render_skill_catalog_html(), f"导入失败：{exc}", gr.update(value=None)
+
+
 def _build_user_history_content(user_message: str, image_path: str | None, file_paths: list[str]) -> str:
     parts: list[str] = []
     text = (user_message or "").strip()
@@ -791,9 +816,38 @@ def _build_client_script() -> str:
         }
       };
 
+            const openSkillPicker = () => {
+                const fileInput = document.querySelector("#skill-folder-box input[type='file']");
+                if (fileInput instanceof HTMLElement) fileInput.click();
+            };
+
+            const toggleSkillPanel = () => {
+                const panel = document.getElementById("skill-panel");
+                if (panel) panel.classList.toggle("open");
+            };
+
       document.addEventListener("click", (event) => {
         const target = event.target;
         if (!(target instanceof HTMLElement)) return;
+                if (target.closest("#skill-btn")) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    toggleSkillPanel();
+                    return;
+                }
+                if (target.closest("#skill-close-btn")) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const panel = document.getElementById("skill-panel");
+                    if (panel) panel.classList.remove("open");
+                    return;
+                }
+                if (target.closest("#skill-add-btn")) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    openSkillPicker();
+                    return;
+                }
         const historyButton = target.closest("[data-history-action]");
         if (historyButton instanceof HTMLElement) {
           event.preventDefault();
@@ -837,6 +891,11 @@ def _build_client_script() -> str:
         if (!target.closest(".history-menu-wrap")) {
           document.querySelectorAll(".history-menu.open").forEach((menu) => menu.classList.remove("open"));
         }
+
+                if (!target.closest("#skill-panel") && !target.closest("#skill-btn")) {
+                    const panel = document.getElementById("skill-panel");
+                    if (panel) panel.classList.remove("open");
+                }
       });
 
       document.addEventListener("click", (event) => {
@@ -988,18 +1047,47 @@ def build_demo() -> gr.Blocks:
     active = _find_conversation(conversations, active_id)
     initial_chat_messages = _history_to_chat_messages(active.get("messages", []))
     initial_history_html = _render_history_sidebar(conversations, active_id)
+    initial_skill_html = render_skill_catalog_html(INITIAL_SKILLS)
 
     with gr.Blocks(title="Mini OpenClaw Chat", head=_build_client_script()) as demo:
-        gr.HTML(
-            """
-            <div class="header-wrap">
-              <div class="page-title">pre OpenClaw</div>
-              <div class="page-meta">工作目录: """
-            + escape(str(WORKSPACE_ROOT))
-            + """</div>
-            </div>
-            """
-        )
+        with gr.Row(elem_id="header-row"):
+            with gr.Column(scale=1, min_width=0, elem_id="header-left"):
+                gr.HTML(
+                    """
+                    <div class="header-wrap">
+                        <div class="page-title">pre OpenClaw</div>
+                        <div class="page-meta">工作目录: """
+                    + escape(str(WORKSPACE_ROOT))
+                    + """</div>
+                    </div>
+                    """
+                )
+            with gr.Column(scale=0, min_width=96, elem_id="header-right"):
+                skill_btn = gr.Button("Skill", elem_id="skill-btn")
+
+        with gr.Column(elem_id="skill-panel"):
+            gr.HTML(
+                """
+                <div class="skill-panel-header">
+                  <div>
+                    <div class="skill-panel-title">Skill 管理</div>
+                    <div class="skill-panel-subtitle">拖入包含 SKILL.md 的文件夹，或点击加号导入。</div>
+                  </div>
+                  <button id="skill-close-btn" type="button">×</button>
+                </div>
+                """
+            )
+            gr.Button("+ 添加 skill 文件夹", elem_id="skill-add-btn")
+            skill_status = gr.Markdown("", elem_id="skill-status")
+            skill_folder_box = gr.File(
+                type="filepath",
+                label="skill 文件夹",
+                visible=True,
+                elem_id="skill-folder-box",
+                file_types=None,
+                file_count="directory",
+            )
+            skill_list_html = gr.HTML(initial_skill_html, elem_id="skill-list-html")
 
         with gr.Row(elem_id="main-row"):
             with gr.Column(scale=3, min_width=280, elem_id="left-panel"):
@@ -1089,6 +1177,13 @@ def build_demo() -> gr.Blocks:
             queue=False,
             show_progress="hidden",
         )
+        skill_folder_box.change(
+            fn=_import_skill_folder,
+            inputs=[skill_folder_box],
+            outputs=[skill_list_html, skill_status, skill_folder_box],
+            queue=False,
+            show_progress="hidden",
+        )
         image_box.change(
             fn=lambda path, files: (path, _render_attachment_strip(path, files or [])),
             inputs=[image_box, pending_files_state],
@@ -1175,6 +1270,167 @@ def main() -> None:
     .page-meta {
         color: #888;
         font-size: 12px;
+    }
+    #header-row {
+        align-items: center !important;
+        gap: 12px !important;
+        padding: 8px 16px !important;
+        border-bottom: 1px solid #d1d5db !important;
+    }
+    .dark #header-row {
+        border-bottom-color: #374151 !important;
+    }
+    .header-wrap {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 0 !important;
+        border: 0 !important;
+    }
+    .header-left {
+        min-width: 0;
+    }
+    #header-right {
+        display: flex !important;
+        justify-content: flex-end !important;
+        align-items: center !important;
+    }
+    #skill-btn,
+    #skill-btn button {
+        flex: 0 0 auto;
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        background: rgba(17, 24, 39, 0.92);
+        color: #e5e7eb;
+        border-radius: 999px;
+        padding: 8px 14px;
+        font-size: 13px;
+        font-weight: 700;
+        cursor: pointer;
+    }
+    #skill-btn:hover,
+    #skill-btn button:hover {
+        background: rgba(37, 99, 235, 0.22);
+    }
+    #skill-panel {
+        display: none !important;
+        position: fixed;
+        top: 56px;
+        right: 14px;
+        z-index: 1500;
+        width: min(420px, calc(100vw - 24px));
+        max-height: calc(100vh - 84px);
+        overflow: hidden;
+        border: 1px solid rgba(148, 163, 184, 0.28);
+        border-radius: 16px;
+        background: rgba(15, 23, 42, 0.96);
+        backdrop-filter: blur(10px);
+        box-shadow: 0 18px 42px rgba(0, 0, 0, 0.38);
+        padding: 12px;
+        transform: translateY(-8px) scale(0.98);
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.18s ease, transform 0.18s ease;
+    }
+    #skill-panel.open {
+        display: block !important;
+        opacity: 1;
+        transform: translateY(0) scale(1);
+        pointer-events: auto;
+    }
+    .skill-panel-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 12px;
+        margin-bottom: 10px;
+    }
+    .skill-panel-title {
+        font-size: 16px;
+        font-weight: 800;
+        color: #f3f4f6;
+    }
+    .skill-panel-subtitle {
+        margin-top: 3px;
+        font-size: 12px;
+        color: #94a3b8;
+        line-height: 1.45;
+    }
+    #skill-close-btn {
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        background: rgba(31, 41, 55, 0.9);
+        color: #e5e7eb;
+        border-radius: 999px;
+        width: 28px;
+        height: 28px;
+        font-size: 18px;
+        line-height: 1;
+        cursor: pointer;
+        flex: 0 0 auto;
+    }
+    .skill-panel-actions {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 10px;
+    }
+    #skill-add-btn {
+        border: 1px solid rgba(148, 163, 184, 0.32);
+        background: rgba(37, 99, 235, 0.16);
+        color: #e5e7eb;
+        border-radius: 12px;
+        padding: 8px 12px;
+        font-size: 13px;
+        font-weight: 700;
+        cursor: pointer;
+    }
+    #skill-add-btn:hover {
+        background: rgba(37, 99, 235, 0.28);
+    }
+    #skill-folder-box {
+        margin-bottom: 10px;
+    }
+    #skill-status {
+        margin-bottom: 8px;
+        color: #cbd5e1;
+    }
+    #skill-list-html {
+        max-height: 220px;
+        overflow-y: auto;
+        padding-right: 4px;
+    }
+    .skill-empty {
+        padding: 10px 4px;
+        color: #94a3b8;
+        font-size: 12px;
+        line-height: 1.6;
+    }
+    .skill-list {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+    }
+    .skill-card {
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.03);
+        padding: 10px 12px;
+    }
+    .skill-card-title {
+        font-size: 14px;
+        font-weight: 700;
+        color: #f8fafc;
+        margin-bottom: 4px;
+    }
+    .skill-card-desc {
+        font-size: 12px;
+        color: #d1d5db;
+        line-height: 1.45;
+        margin-bottom: 6px;
+    }
+    .skill-card-path {
+        font-size: 11px;
+        color: #94a3b8;
+        word-break: break-all;
     }
     #main-row {
         flex: 1 1 auto !important;

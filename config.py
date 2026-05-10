@@ -8,6 +8,7 @@ BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(dotenv_path=BASE_DIR / ".env", override=False)
 
 WORKSPACE_ROOT = Path(os.getenv("AGENT_WORKSPACE_ROOT", BASE_DIR)).resolve()
+SKILL_ROOT = WORKSPACE_ROOT / ".claude" / "skills"
 MODEL_NAME = os.getenv("MODEL_NAME", "deepseek-chat")
 VISION_MODEL = os.getenv("VISION_MODEL", "gpt-4.1-mini")
 MAX_TURNS = int(os.getenv("MAX_TURNS", "8"))
