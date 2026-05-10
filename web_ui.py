@@ -575,6 +575,41 @@ def _read_uploaded_file_previews(file_rels: list[str], max_chars_each: int = 250
     return out
 
 
+def _render_history_user_message(content: str) -> str:
+    text_lines: list[str] = []
+    image_paths: list[str] = []
+    file_paths: list[str] = []
+
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        image_match = re.match(r"^\[图片\]\s+(.+)$", line)
+        if image_match:
+            image_path = image_match.group(1).strip()
+            if image_path:
+                image_paths.append(image_path)
+            continue
+        file_match = re.match(r"^\[文件\]\s+(.+)$", line)
+        if file_match:
+            file_path = file_match.group(1).strip()
+            if file_path:
+                file_paths.append(file_path)
+            continue
+        text_lines.append(raw_line)
+
+    pieces: list[str] = []
+    text = "\n".join(text_lines).strip()
+    if text:
+        pieces.append(f"<div class='history-user-text'>{escape(text)}</div>")
+    if image_paths:
+        images_html = "".join(_build_uploaded_image_html(path) for path in image_paths)
+        pieces.append(f"<div class='history-user-images'>{images_html}</div>")
+    if file_paths:
+        pieces.append(_build_uploaded_files_html(file_paths))
+    return "".join(pieces) if pieces else escape(content.strip())
+
+
 def _history_to_chat_messages(agent_history: list[dict]) -> list[dict[str, str]]:
     chat_messages: list[dict[str, str]] = []
     for item in agent_history:
@@ -587,13 +622,7 @@ def _history_to_chat_messages(agent_history: list[dict]) -> list[dict[str, str]]
         if role == "assistant":
             chat_messages.append({"role": role, "content": _format_assistant_content("", content)})
         else:
-            cleaned_user = re.sub(
-                r"(?im)^\[图片\]\s+.+(?:\\|/)(?:temp|tmp)(?:\\|/).*?\.(?:png|jpg|jpeg|webp|bmp)\s*$",
-                "[图片已上传]",
-                content.strip(),
-            )
-            cleaned_user = re.sub(r"(?im)^\[文件\]\s+.+$", "", cleaned_user).strip()
-            chat_messages.append({"role": role, "content": cleaned_user})
+            chat_messages.append({"role": role, "content": _render_history_user_message(content)})
     return chat_messages
 
 
