@@ -258,6 +258,11 @@ def _normalize_conversation(conv: dict) -> dict:
     }
 
 
+def _conversation_has_messages(conv: dict) -> bool:
+    messages = conv.get("messages", [])
+    return isinstance(messages, list) and any(bool(str(item.get("content", "")).strip()) for item in messages if isinstance(item, dict))
+
+
 def _new_conversation(messages: list[dict] | None = None) -> dict:
     msgs = list(messages or [])
     return {
@@ -287,9 +292,15 @@ def _find_conversation(conversations: list[dict], conv_id: str) -> dict:
 
 
 def _persist_conversations(conversations: list[dict], active_id: str) -> None:
-    payload = {"active_id": active_id, "conversations": conversations}
+    persisted = [_normalize_conversation(conv) for conv in conversations if isinstance(conv, dict) and _conversation_has_messages(conv)]
+    if not persisted:
+        if CONVERSATIONS_FILE.exists():
+            CONVERSATIONS_FILE.unlink()
+        return
+
+    active = next((conv for conv in persisted if conv.get("id") == active_id), persisted[0])
+    payload = {"active_id": str(active.get("id") or active_id), "conversations": persisted}
     CONVERSATIONS_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    active = _find_conversation(conversations, active_id)
     save_history(HISTORY_FILE, active.get("messages", []))
 
 
@@ -299,10 +310,12 @@ def _load_or_init_conversations() -> tuple[list[dict], str]:
             data = json.loads(CONVERSATIONS_FILE.read_text(encoding="utf-8"))
             conversations = data.get("conversations", [])
             if isinstance(conversations, list) and conversations:
-                convs = [_normalize_conversation(c) for c in conversations if isinstance(c, dict)]
+                convs = [
+                    _normalize_conversation(c)
+                    for c in conversations
+                    if isinstance(c, dict) and _conversation_has_messages(c)
+                ]
                 if convs:
-                    # Always start with a fresh conversation on page open,
-                    # while keeping existing history in sidebar.
                     new_conv = _new_conversation([])
                     convs.append(new_conv)
                     active_id = new_conv["id"]
@@ -311,10 +324,13 @@ def _load_or_init_conversations() -> tuple[list[dict], str]:
             pass
 
     old_messages = load_history(HISTORY_FILE)
-    first = _new_conversation(old_messages)
-    conversations = [first]
-    _persist_conversations(conversations, first["id"])
-    return conversations, first["id"]
+    conversations: list[dict] = []
+    if old_messages:
+        conversations.append(_new_conversation(old_messages))
+
+    fresh = _new_conversation([])
+    conversations.append(fresh)
+    return conversations, fresh["id"]
 
 
 def _render_history_sidebar(conversations: list[dict], active_id: str) -> str:
@@ -860,11 +876,14 @@ def _handle_history_action(
 
 
 def _new_chat(conversations: list[dict]) -> tuple[str, list[dict], str, list[dict[str, str]], str, str]:
-    convs = [_normalize_conversation(c) for c in list(conversations or [])]
+    convs = [
+        _normalize_conversation(c)
+        for c in list(conversations or [])
+        if isinstance(c, dict) and _conversation_has_messages(c)
+    ]
     conv = _new_conversation([])
     convs.append(conv)
     active_id = conv["id"]
-    _persist_conversations(convs, active_id)
     return _render_history_sidebar(convs, active_id), convs, active_id, [], "", _render_attachment_strip(None, [])
 
 
