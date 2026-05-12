@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from html import escape
 from pathlib import Path
 from typing import Any
 import re
 import shutil
+import io
+import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
+import zipfile
 
 from config import WORKSPACE_ROOT
 
@@ -29,6 +36,21 @@ class SkillImportError(Exception):
 def ensure_skill_root() -> Path:
     SKILL_ROOT.mkdir(parents=True, exist_ok=True)
     return SKILL_ROOT
+
+def _download_bytes(url: str) -> bytes:
+    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return response.read()
+
+
+def _download_text(url: str) -> str:
+    data = _download_bytes(url)
+    for encoding in ("utf-8", "utf-8-sig", "latin-1"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="ignore")
 
 
 def _slugify(text: str) -> str:
@@ -123,6 +145,53 @@ def _build_skill_markdown(name: str, description: str, body: str) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+def parse_skill_install_input(text: str) -> tuple[str, str | None]:
+    raw = (text or "").strip()
+    if not raw:
+        raise SkillImportError("请输入要安装的 URL 或命令")
+
+    if not re.search(r"\s", raw):
+        return raw, None
+
+    url_match = re.search(r"https?://\S+", raw)
+    if url_match is None:
+        raise SkillImportError("没有在输入内容里找到 URL")
+
+    url = url_match.group(0).rstrip(")],.;:'\"")
+    skill_name: str | None = None
+
+    skill_match = re.search(r"(?:--skill(?:=|\s+)|-s\s+)([A-Za-z0-9_\-]+)", raw)
+    if skill_match is not None:
+        skill_name = skill_match.group(1).strip() or None
+
+    return url, skill_name
+
+def _copy_tree(src_dir: Path, dst_dir: Path) -> None:
+    for src in sorted(src_dir.rglob("*")):
+        rel = src.relative_to(src_dir)
+        dst = dst_dir / rel
+        if src.is_dir():
+            dst.mkdir(parents=True, exist_ok=True)
+        else:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+
+
+def _resolve_markdown_skill_record(folder: Path, markdown_path: Path) -> SkillRecord:
+    raw_text = markdown_path.read_text(encoding="utf-8", errors="ignore")
+    metadata, body = _parse_frontmatter(raw_text)
+    name = metadata.get("name") or _extract_title(body) or folder.name
+    description = metadata.get("description") or _extract_description(body)
+    return SkillRecord(
+        name=name,
+        description=description or "",
+        folder=folder,
+        markdown_path=markdown_path,
+        content=raw_text,
+        metadata=metadata,
+    )
+
+
 def import_skill_bundle(file_paths: list[str]) -> tuple[Path, SkillRecord]:
     ensure_skill_root()
     files = [Path(path) for path in file_paths if isinstance(path, str) and Path(path).exists() and Path(path).is_file()]
@@ -137,6 +206,12 @@ def import_skill_bundle(file_paths: list[str]) -> tuple[Path, SkillRecord]:
     metadata, body = _parse_frontmatter(raw_text)
     name = metadata.get("name") or _extract_title(body) or source_markdown.stem
     description = metadata.get("description") or _extract_description(body)
+
+    normalized_name = _slugify(name).lower()
+    for existing in scan_skills():
+        existing_name = _slugify(existing.name).lower()
+        if existing_name == normalized_name or existing.folder.name.lower() == normalized_name:
+            raise SkillImportError(f"skill 已存在：{existing.name}")
 
     target_folder = _unique_folder_name(name)
     target_folder.mkdir(parents=True, exist_ok=False)
@@ -161,6 +236,220 @@ def import_skill_bundle(file_paths: list[str]) -> tuple[Path, SkillRecord]:
         metadata=metadata,
     )
     return target_folder, record
+
+
+def _is_github_url(url: str) -> bool:
+    parsed = urllib.parse.urlparse(url)
+    return parsed.scheme in {"http", "https"} and parsed.netloc.lower().endswith("github.com")
+
+
+def _parse_github_path(url: str) -> tuple[str, str, str | None, str | None]:
+    parsed = urllib.parse.urlparse(url)
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) < 2:
+        raise SkillImportError("GitHub URL 格式不正确")
+    owner, repo = parts[0], parts[1].removesuffix(".git")
+    ref: str | None = None
+    subpath: str | None = None
+    if len(parts) >= 4 and parts[2] in {"tree", "blob"}:
+        ref = parts[3]
+        if len(parts) > 4:
+            subpath = "/".join(parts[4:])
+    return owner, repo, ref, subpath
+
+
+def _github_archive_candidates(url: str) -> list[str]:
+    owner, repo, ref, _subpath = _parse_github_path(url)
+    if ref:
+        return [f"https://codeload.github.com/{owner}/{repo}/zip/refs/heads/{ref}"]
+    return [
+        f"https://codeload.github.com/{owner}/{repo}/zip/refs/heads/main",
+        f"https://codeload.github.com/{owner}/{repo}/zip/refs/heads/master",
+    ]
+
+
+def _github_raw_candidates(url: str, skill_name: str | None = None) -> list[str]:
+    owner, repo, ref, subpath = _parse_github_path(url)
+    branches = [ref] if ref else ["main", "master"]
+    paths: list[str] = []
+
+    if subpath:
+        normalized = _normalize_zip_path(subpath).strip("/")
+        if normalized:
+            paths.extend([normalized, f"{normalized}/SKILL.md"])
+    elif skill_name:
+        skill_slug = _slugify(skill_name).lower()
+        paths.extend([
+            f"skills/{skill_slug}/SKILL.md",
+            f"skills/{skill_name}/SKILL.md",
+            f"{skill_slug}/SKILL.md",
+        ])
+
+    candidates: list[str] = []
+    for branch in branches:
+        for rel_path in paths:
+            candidates.append(f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{rel_path}")
+    return candidates
+
+
+def _normalize_zip_path(name: str) -> str:
+    return name.replace("\\", "/").lstrip("/")
+
+
+def _choose_zip_skill_prefix(zf: zipfile.ZipFile, skill_hint: str | None = None, subpath: str | None = None) -> str:
+    hint = (skill_hint or "").strip().lower()
+    subpath_norm = _normalize_zip_path(subpath or "").strip("/").lower()
+    candidates: list[tuple[int, str]] = []
+
+    for info in zf.infolist():
+        if info.is_dir():
+            continue
+        normalized = _normalize_zip_path(info.filename)
+        lower = normalized.lower()
+        if subpath_norm and subpath_norm not in lower:
+            continue
+        path = Path(normalized)
+        if path.name.upper() != "SKILL.md" and path.suffix.lower() not in {".md", ".markdown"}:
+            continue
+        parts = [part.lower() for part in path.parts]
+        score = 0
+        if path.name.upper() == "SKILL.md":
+            score += 6
+        if hint:
+            if hint == path.parent.name.lower():
+                score += 10
+            if hint in parts:
+                score += 4
+            if hint in lower:
+                score += 2
+            if path.stem.lower() == hint:
+                score += 3
+        if subpath_norm and subpath_norm in lower:
+            score += 2
+        candidates.append((score, normalized))
+
+    if not candidates:
+        raise SkillImportError("压缩包里没有找到可安装的 skill 文件")
+
+    candidates.sort(key=lambda item: (item[0], len(item[1])), reverse=True)
+    best_score, best_file = candidates[0]
+    if best_score <= 0:
+        raise SkillImportError("压缩包里没有找到匹配的 skill 文件")
+    return str(Path(best_file).parent).replace("\\", "/")
+
+
+def _install_skill_from_markdown_text(markdown_text: str, preferred_name: str | None = None) -> tuple[Path, SkillRecord]:
+    metadata, body = _parse_frontmatter(markdown_text)
+    name = (preferred_name or metadata.get("name") or _extract_title(body) or "skill").strip()
+    description = metadata.get("description") or _extract_description(body)
+
+    target_folder = _unique_folder_name(name)
+    target_folder.mkdir(parents=True, exist_ok=False)
+    markdown_path = target_folder / "SKILL.md"
+    markdown_path.write_text(_build_skill_markdown(name, description, body), encoding="utf-8")
+    return target_folder, _resolve_markdown_skill_record(target_folder, markdown_path)
+
+
+def install_skill_from_url(url: str, skill_name: str | None = None) -> tuple[Path, SkillRecord]:
+    ensure_skill_root()
+    source_url = (url or "").strip()
+    preferred_name = (skill_name or "").strip() or None
+    if not source_url:
+        raise SkillImportError("请输入要安装的 URL")
+
+    if _is_github_url(source_url):
+        owner, repo, ref, subpath = _parse_github_path(source_url)
+        if preferred_name or subpath:
+            for raw_url in _github_raw_candidates(source_url, preferred_name):
+                try:
+                    text = _download_text(raw_url)
+                    if text.strip():
+                        return _install_skill_from_markdown_text(text, preferred_name)
+                except (urllib.error.URLError, OSError, SkillImportError):
+                    continue
+        archive_candidates = _github_archive_candidates(source_url)
+        last_error: Exception | None = None
+        for archive_url in archive_candidates:
+            try:
+                archive_bytes = _download_bytes(archive_url)
+                with zipfile.ZipFile(io.BytesIO(archive_bytes)) as zf:
+                    skill_prefix = _choose_zip_skill_prefix(zf, preferred_name, subpath)
+                    if subpath:
+                        normalized_subpath = _normalize_zip_path(subpath).strip("/")
+                        if skill_prefix:
+                            skill_prefix = f"{skill_prefix}/{normalized_subpath}" if normalized_subpath not in skill_prefix else skill_prefix
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        temp_root = Path(temp_dir)
+                        extracted_root = temp_root / "archive"
+                        zf.extractall(extracted_root)
+                        top_dirs = [p for p in extracted_root.iterdir() if p.is_dir()]
+                        if not top_dirs:
+                            raise SkillImportError("无法解压 GitHub archive")
+                        repo_root = top_dirs[0]
+                        if subpath:
+                            target_source = repo_root / Path(subpath)
+                        else:
+                            target_source = repo_root / Path(skill_prefix)
+                        if not target_source.exists() or not target_source.is_dir():
+                            raise SkillImportError(f"没有找到 skill 目录: {preferred_name or subpath or 'unknown'}")
+                        markdowns = sorted(target_source.glob("*.md"), key=lambda p: p.name.lower())
+                        markdown_path = next((p for p in markdowns if p.name.lower() == "skill.md"), None) or (markdowns[0] if markdowns else None)
+                        if markdown_path is None:
+                            raise SkillImportError("目标目录里没有 markdown skill 文件")
+
+                        metadata, body = _parse_frontmatter(markdown_path.read_text(encoding="utf-8", errors="ignore"))
+                        name = (preferred_name or metadata.get("name") or target_source.name).strip()
+                        description = metadata.get("description") or _extract_description(body)
+                        target_folder = _unique_folder_name(name)
+                        target_folder.mkdir(parents=True, exist_ok=False)
+                        _copy_tree(target_source, target_folder)
+                        canonical_markdown = target_folder / "SKILL.md"
+                        if markdown_path.name != "SKILL.md":
+                            canonical_markdown.write_text(_build_skill_markdown(name, description, body), encoding="utf-8")
+                        elif markdown_path.name == "SKILL.md" and markdown_path.parent != target_folder:
+                            shutil.copy2(markdown_path, canonical_markdown)
+                        record = _resolve_markdown_skill_record(target_folder, canonical_markdown)
+                        return target_folder, record
+            except (urllib.error.URLError, zipfile.BadZipFile, SkillImportError, OSError) as exc:
+                last_error = exc
+                continue
+        raise SkillImportError(f"从 GitHub 安装 skill 失败：{last_error or 'unknown error'}")
+
+    if source_url.lower().endswith(('.md', '.markdown')):
+        text = _download_text(source_url)
+        return _install_skill_from_markdown_text(text, preferred_name)
+
+    if source_url.lower().endswith('.zip'):
+        archive_bytes = _download_bytes(source_url)
+        with zipfile.ZipFile(io.BytesIO(archive_bytes)) as zf:
+            skill_prefix = _choose_zip_skill_prefix(zf, preferred_name)
+            with tempfile.TemporaryDirectory() as temp_dir:
+                extracted_root = Path(temp_dir) / "archive"
+                zf.extractall(extracted_root)
+                top_dirs = [p for p in extracted_root.iterdir() if p.is_dir()]
+                if not top_dirs:
+                    raise SkillImportError("无法解压 skill 压缩包")
+                source_folder = top_dirs[0] / Path(skill_prefix)
+                if not source_folder.exists() or not source_folder.is_dir():
+                    raise SkillImportError("压缩包里没有找到 skill 目录")
+                markdowns = sorted(source_folder.glob("*.md"), key=lambda p: p.name.lower())
+                markdown_path = next((p for p in markdowns if p.name.lower() == "skill.md"), None) or (markdowns[0] if markdowns else None)
+                if markdown_path is None:
+                    raise SkillImportError("目标目录里没有 markdown skill 文件")
+                metadata, body = _parse_frontmatter(markdown_path.read_text(encoding="utf-8", errors="ignore"))
+                name = (preferred_name or metadata.get("name") or source_folder.name).strip()
+                description = metadata.get("description") or _extract_description(body)
+                target_folder = _unique_folder_name(name)
+                target_folder.mkdir(parents=True, exist_ok=False)
+                _copy_tree(source_folder, target_folder)
+                canonical_markdown = target_folder / "SKILL.md"
+                if markdown_path.name != "SKILL.md":
+                    canonical_markdown.write_text(_build_skill_markdown(name, description, body), encoding="utf-8")
+                record = _resolve_markdown_skill_record(target_folder, canonical_markdown)
+                return target_folder, record
+
+    text = _download_text(source_url)
+    return _install_skill_from_markdown_text(text, preferred_name)
 
 
 def scan_skills() -> list[SkillRecord]:
@@ -266,19 +555,45 @@ def build_skill_prompt(user_input: str) -> str:
 def render_skill_catalog_html(skills: list[SkillRecord] | None = None) -> str:
     skills = skills if skills is not None else scan_skills()
     if not skills:
-        return "<div class='skill-empty'>还没有导入 skill。可以拖入 skill 文件夹，或点右上角按钮添加。</div>"
+        return "<div class='skill-empty'>还没有导入 skill。可以点右上角按钮添加。</div>"
 
     cards: list[str] = []
     for skill in skills:
         title = skill.name.strip() or skill.folder.name
-        desc = skill.description.strip() or "无描述"
-        rel_path = skill.folder.relative_to(SKILL_ROOT).as_posix() if skill.folder.is_relative_to(SKILL_ROOT) else skill.folder.name
+        folder_name = escape(skill.folder.name)
         cards.append(
             "<div class='skill-card'>"
-            f"<div class='skill-card-title'>{title}</div>"
-            f"<div class='skill-card-desc'>{desc}</div>"
-            f"<div class='skill-card-path'>{rel_path}</div>"
+            f"<div class='skill-card-title'>{escape(title)}</div>"
+            f"<button type='button' class='skill-card-delete' data-skill-delete='{folder_name}' title='删除 skill'>×</button>"
             "</div>"
         )
 
     return "<div class='skill-list'>" + "".join(cards) + "</div>"
+
+
+def delete_skill_folder(folder_name: str) -> SkillRecord:
+    root = ensure_skill_root()
+    target_folder_name = (folder_name or "").strip()
+    if not target_folder_name:
+        raise SkillImportError("请选择要删除的 skill")
+
+    target_folder = root / target_folder_name
+    if not target_folder.exists() or not target_folder.is_dir():
+        raise SkillImportError("找不到要删除的 skill")
+
+    markdown_path = target_folder / "SKILL.md"
+    if not markdown_path.exists():
+        markdowns = sorted(target_folder.glob("*.md"), key=lambda p: p.name.lower())
+        if markdowns:
+            markdown_path = markdowns[0]
+
+    record = _resolve_markdown_skill_record(target_folder, markdown_path) if markdown_path.exists() else SkillRecord(
+        name=target_folder.name,
+        description="",
+        folder=target_folder,
+        markdown_path=markdown_path,
+        content="",
+        metadata={},
+    )
+    shutil.rmtree(target_folder)
+    return record

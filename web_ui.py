@@ -16,7 +16,7 @@ import gradio as gr
 
 from config import HISTORY_FILE, MODEL_NAME, VISION_MODEL, WORKSPACE_ROOT
 from main import load_history, run_agent_stream_with_trace, run_agent_with_trace, save_history
-from skill_manager import import_skill_bundle, render_skill_catalog_html, scan_skills
+from skill_manager import delete_skill_folder, import_skill_bundle, install_skill_from_url, parse_skill_install_input, render_skill_catalog_html, scan_skills
 from tooling import ToolRegistry
 from vision_agent import run_vision_agent
 
@@ -455,27 +455,77 @@ def _render_chat_empty_state(visible: bool) -> str:
         "</div>"
     )
 
-
 def _refresh_skill_panel() -> tuple[str, str, Any]:
     skills = scan_skills()
     return render_skill_catalog_html(skills), f"已加载 {len(skills)} 个 skill。", gr.update(value=None)
-
-
-def _import_skill_folder(file_input: Any) -> tuple[str, str, Any]:
+def _import_skill_folder(file_input: Any) -> tuple[str, Any]:
     paths = _normalize_file_paths(file_input)
     if not paths:
-        return render_skill_catalog_html(), "请先选择一个 skill 文件夹。", gr.update(value=None)
+        skills = scan_skills()
+        return render_skill_catalog_html(skills), gr.update(value=None)
 
     try:
         folder, record = import_skill_bundle(paths)
         skills = scan_skills()
-        return (
-            render_skill_catalog_html(skills),
-            f"已导入 skill：{record.name}，位置：{folder.relative_to(WORKSPACE_ROOT).as_posix()}",
-            gr.update(value=None),
-        )
+        _ = folder
+        _ = record
+        return render_skill_catalog_html(skills), gr.update(value=None)
+    except SkillImportError as exc:
+        gr.Info(str(exc))
+        skills = scan_skills()
+        return render_skill_catalog_html(skills), gr.update(value=None)
     except Exception as exc:  # noqa: BLE001
-        return render_skill_catalog_html(), f"导入失败：{exc}", gr.update(value=None)
+        gr.Info(f"导入失败：{exc}")
+        skills = scan_skills()
+        return render_skill_catalog_html(skills), gr.update(value=None)
+
+
+def _install_skill_from_link(url: str) -> tuple[str, Any]:
+    raw_input = (url or "").strip()
+    if not raw_input:
+        skills = scan_skills()
+        return render_skill_catalog_html(skills), gr.update(value="")
+
+    try:
+        parsed_url, parsed_skill_name = parse_skill_install_input(raw_input)
+        folder, record = install_skill_from_url(parsed_url, parsed_skill_name)
+        skills = scan_skills()
+        _ = folder
+        _ = record
+        return render_skill_catalog_html(skills), gr.update(value="")
+    except SkillImportError as exc:
+        gr.Info(str(exc))
+        skills = scan_skills()
+        return render_skill_catalog_html(skills), gr.update(value=raw_input)
+    except Exception as exc:  # noqa: BLE001
+        gr.Info(f"URL 安装失败：{exc}")
+        skills = scan_skills()
+        return render_skill_catalog_html(skills), gr.update(value=raw_input)
+
+
+def _delete_skill(skill_folder_name: str) -> tuple[str, Any]:
+    selected = (skill_folder_name or "").strip()
+    skills = scan_skills()
+    if not selected:
+        return render_skill_catalog_html(skills), gr.update(value=None)
+
+    try:
+        record = delete_skill_folder(selected)
+        skills = scan_skills()
+        _ = record
+        return render_skill_catalog_html(skills), gr.update(value=None)
+    except Exception as exc:  # noqa: BLE001
+        gr.Info(f"删除失败：{exc}")
+        return render_skill_catalog_html(skills), gr.update(value=selected)
+
+
+def _dispatch_skill_action(action: str, target: str) -> tuple[str, Any]:
+    action = (action or "").strip().lower()
+    target = (target or "").strip()
+    if action == "delete":
+        return _delete_skill(target)
+    skills = scan_skills()
+    return render_skill_catalog_html(skills), gr.update(value=None)
 
 
 def _build_user_history_content(user_message: str, image_path: str | None, file_paths: list[str]) -> str:
@@ -816,9 +866,13 @@ def _build_client_script() -> str:
         }
       };
 
-            const openSkillPicker = () => {
-                const fileInput = document.querySelector("#skill-folder-box input[type='file']");
-                if (fileInput instanceof HTMLElement) fileInput.click();
+            const dispatchSkillAction = (action, targetId) => {
+                setTextboxValue("#skill-action-box textarea, #skill-action-box input", action);
+                setTextboxValue("#skill-target-box textarea, #skill-target-box input", targetId);
+                const btn = document.querySelector("#skill-dispatch button") || document.querySelector("#skill-dispatch");
+                if (btn) {
+                    window.setTimeout(() => btn.click(), 0);
+                }
             };
 
             const toggleSkillPanel = () => {
@@ -826,9 +880,53 @@ def _build_client_script() -> str:
                 if (panel) panel.classList.toggle("open");
             };
 
-      document.addEventListener("click", (event) => {
-        const target = event.target;
-        if (!(target instanceof HTMLElement)) return;
+            const bindSkillButton = () => {
+                const trigger = document.getElementById("skill-btn");
+                if (!(trigger instanceof HTMLElement) || trigger.dataset.boundSkillToggle === "1") return;
+                trigger.dataset.boundSkillToggle = "1";
+                trigger.style.pointerEvents = "auto";
+                trigger.style.position = "relative";
+                trigger.style.zIndex = "1601";
+                trigger.addEventListener("click", (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    toggleSkillPanel();
+                });
+            };
+
+            const disableSkillFolderDragDrop = () => {
+                const skillBox = document.getElementById("skill-folder-box");
+                const fileInput = skillBox ? skillBox.querySelector("input[type='file']") : null;
+                const trigger = document.getElementById("skill-folder-btn");
+                const targets = [skillBox, fileInput].filter((node) => node instanceof HTMLElement);
+                for (const target of targets) {
+                    ["dragenter", "dragover", "dragleave", "drop"].forEach((eventName) => {
+                        target.addEventListener(eventName, (event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                        });
+                    });
+                }
+                if (trigger instanceof HTMLElement && fileInput instanceof HTMLInputElement && !trigger.dataset.boundSkillPicker) {
+                    trigger.dataset.boundSkillPicker = "1";
+                    trigger.addEventListener("click", (event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        fileInput.click();
+                    });
+                }
+            };
+
+            document.addEventListener("DOMContentLoaded", disableSkillFolderDragDrop);
+            document.addEventListener("DOMContentLoaded", bindSkillButton);
+            if (document.readyState !== "loading") {
+                disableSkillFolderDragDrop();
+                bindSkillButton();
+            }
+
+            document.addEventListener("click", (event) => {
+                const target = event.target;
+                if (!(target instanceof HTMLElement)) return;
                 if (target.closest("#skill-btn")) {
                     event.preventDefault();
                     event.stopPropagation();
@@ -842,13 +940,15 @@ def _build_client_script() -> str:
                     if (panel) panel.classList.remove("open");
                     return;
                 }
-                if (target.closest("#skill-add-btn")) {
+                const skillDeleteBtn = target.closest("[data-skill-delete]");
+                if (skillDeleteBtn instanceof HTMLElement) {
                     event.preventDefault();
                     event.stopPropagation();
-                    openSkillPicker();
+                    const folder = skillDeleteBtn.getAttribute("data-skill-delete") || "";
+                    if (folder) dispatchSkillAction("delete", folder);
                     return;
                 }
-        const historyButton = target.closest("[data-history-action]");
+                const historyButton = target.closest("[data-history-action]");
         if (historyButton instanceof HTMLElement) {
           event.preventDefault();
           event.stopPropagation();
@@ -1071,23 +1171,31 @@ def build_demo() -> gr.Blocks:
                 <div class="skill-panel-header">
                   <div>
                     <div class="skill-panel-title">Skill 管理</div>
-                    <div class="skill-panel-subtitle">拖入包含 SKILL.md 的文件夹，或点击加号导入。</div>
+                    <div class="skill-panel-subtitle">skills储存路径:C:\\Users\\tyy86\\Desktop\\proSec\\.claude\\skills</div>
                   </div>
                   <button id="skill-close-btn" type="button">×</button>
                 </div>
                 """
             )
-            gr.Button("+ 添加 skill 文件夹", elem_id="skill-add-btn")
-            skill_status = gr.Markdown("", elem_id="skill-status")
+            skill_url_box = gr.Textbox(
+                label="Skill URL / 命令",
+                placeholder="粘贴 URL，如 npx skills add ... --skill ...",
+                elem_id="skill-url-box",
+            )
+            skill_install_btn = gr.Button("从 URL 安装", elem_id="skill-install-btn")
+            skill_folder_btn = gr.Button("选择 skill 文件夹", elem_id="skill-folder-btn")
             skill_folder_box = gr.File(
                 type="filepath",
                 label="skill 文件夹",
-                visible=True,
+                visible=False,
                 elem_id="skill-folder-box",
                 file_types=None,
                 file_count="directory",
             )
             skill_list_html = gr.HTML(initial_skill_html, elem_id="skill-list-html")
+            skill_action_box = gr.Textbox(value="", elem_id="skill-action-box", elem_classes="bridge-hidden")
+            skill_target_box = gr.Textbox(value="", elem_id="skill-target-box", elem_classes="bridge-hidden")
+            skill_dispatch = gr.Button("dispatch", elem_id="skill-dispatch", elem_classes="bridge-hidden")
 
         with gr.Row(elem_id="main-row"):
             with gr.Column(scale=3, min_width=280, elem_id="left-panel"):
@@ -1180,7 +1288,21 @@ def build_demo() -> gr.Blocks:
         skill_folder_box.change(
             fn=_import_skill_folder,
             inputs=[skill_folder_box],
-            outputs=[skill_list_html, skill_status, skill_folder_box],
+            outputs=[skill_list_html, skill_folder_box],
+            queue=False,
+            show_progress="hidden",
+        )
+        skill_install_btn.click(
+            fn=_install_skill_from_link,
+            inputs=[skill_url_box],
+            outputs=[skill_list_html, skill_url_box],
+            queue=False,
+            show_progress="hidden",
+        )
+        skill_dispatch.click(
+            fn=_dispatch_skill_action,
+            inputs=[skill_action_box, skill_target_box],
+            outputs=[skill_list_html, skill_folder_box],
             queue=False,
             show_progress="hidden",
         )
@@ -1295,6 +1417,9 @@ def main() -> None:
         display: flex !important;
         justify-content: flex-end !important;
         align-items: center !important;
+        pointer-events: auto !important;
+        position: relative !important;
+        z-index: 1600 !important;
     }
     #skill-btn,
     #skill-btn button {
@@ -1307,6 +1432,7 @@ def main() -> None:
         font-size: 13px;
         font-weight: 700;
         cursor: pointer;
+        pointer-events: auto !important;
     }
     #skill-btn:hover,
     #skill-btn button:hover {
@@ -1373,25 +1499,31 @@ def main() -> None:
         gap: 8px;
         margin-bottom: 10px;
     }
-    #skill-add-btn {
+    #skill-url-box {
+        margin-bottom: 8px;
+    }
+    #skill-url-box input,
+    #skill-url-box textarea {
+        border-radius: 12px !important;
+    }
+    #skill-install-btn,
+    #skill-install-btn button {
         border: 1px solid rgba(148, 163, 184, 0.32);
-        background: rgba(37, 99, 235, 0.16);
+        background: rgba(16, 185, 129, 0.16);
         color: #e5e7eb;
         border-radius: 12px;
         padding: 8px 12px;
         font-size: 13px;
         font-weight: 700;
         cursor: pointer;
+        margin-bottom: 8px;
     }
-    #skill-add-btn:hover {
-        background: rgba(37, 99, 235, 0.28);
+    #skill-install-btn:hover,
+    #skill-install-btn button:hover {
+        background: rgba(16, 185, 129, 0.28);
     }
     #skill-folder-box {
-        margin-bottom: 10px;
-    }
-    #skill-status {
-        margin-bottom: 8px;
-        color: #cbd5e1;
+        margin-bottom: 0;
     }
     #skill-list-html {
         max-height: 220px;
@@ -1413,24 +1545,39 @@ def main() -> None:
         border: 1px solid rgba(148, 163, 184, 0.18);
         border-radius: 12px;
         background: rgba(255, 255, 255, 0.03);
-        padding: 10px 12px;
+        padding: 8px 10px 8px 12px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
     }
     .skill-card-title {
         font-size: 14px;
         font-weight: 700;
         color: #f8fafc;
-        margin-bottom: 4px;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        flex: 1 1 auto;
     }
-    .skill-card-desc {
-        font-size: 12px;
-        color: #d1d5db;
-        line-height: 1.45;
-        margin-bottom: 6px;
+    .skill-card-delete {
+        border: 1px solid rgba(248, 113, 113, 0.32);
+        background: rgba(248, 113, 113, 0.14);
+        color: #fee2e2;
+        border-radius: 999px;
+        width: 22px;
+        height: 22px;
+        flex: 0 0 auto;
+        cursor: pointer;
+        font-size: 16px;
+        line-height: 1;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        margin-left: auto;
     }
-    .skill-card-path {
-        font-size: 11px;
-        color: #94a3b8;
-        word-break: break-all;
+    .skill-card-delete:hover {
+        background: rgba(248, 113, 113, 0.28);
     }
     #main-row {
         flex: 1 1 auto !important;
