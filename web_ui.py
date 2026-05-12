@@ -897,7 +897,6 @@ def _build_client_script() -> str:
             const disableSkillFolderDragDrop = () => {
                 const skillBox = document.getElementById("skill-folder-box");
                 const fileInput = skillBox ? skillBox.querySelector("input[type='file']") : null;
-                const trigger = document.getElementById("skill-folder-btn");
                 const targets = [skillBox, fileInput].filter((node) => node instanceof HTMLElement);
                 for (const target of targets) {
                     ["dragenter", "dragover", "dragleave", "drop"].forEach((eventName) => {
@@ -905,14 +904,6 @@ def _build_client_script() -> str:
                             event.preventDefault();
                             event.stopPropagation();
                         });
-                    });
-                }
-                if (trigger instanceof HTMLElement && fileInput instanceof HTMLInputElement && !trigger.dataset.boundSkillPicker) {
-                    trigger.dataset.boundSkillPicker = "1";
-                    trigger.addEventListener("click", (event) => {
-                        event.preventDefault();
-                        event.stopPropagation();
-                        fileInput.click();
                     });
                 }
             };
@@ -1183,11 +1174,10 @@ def build_demo() -> gr.Blocks:
                 elem_id="skill-url-box",
             )
             skill_install_btn = gr.Button("从 URL 安装", elem_id="skill-install-btn")
-            skill_folder_btn = gr.Button("选择 skill 文件夹", elem_id="skill-folder-btn")
             skill_folder_box = gr.File(
                 type="filepath",
                 label="skill 文件夹",
-                visible=False,
+                visible=True,
                 elem_id="skill-folder-box",
                 file_types=None,
                 file_count="directory",
@@ -1523,7 +1513,21 @@ def main() -> None:
         background: rgba(16, 185, 129, 0.28);
     }
     #skill-folder-box {
-        margin-bottom: 0;
+        margin: -2px 0 0 0;
+        padding: 0;
+    }
+    #skill-folder-box > div {
+        margin-top: 0 !important;
+        margin-bottom: 0 !important;
+        padding-top: 4px !important;
+        padding-bottom: 4px !important;
+        min-height: 0 !important;
+    }
+    #skill-folder-box button {
+        height: 160px !important;
+        min-height: 160px !important;
+        padding-top: 8px !important;
+        padding-bottom: 8px !important;
     }
     #skill-list-html {
         max-height: 220px;
