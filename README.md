@@ -106,6 +106,7 @@ proSec/
 
 怎么实现：
 - 通过 [skill_manager.py](skill_manager.py) 扫描、导入和安装 skill。
+- 从 URL 安装时会优先按 skill 目录下载整包文件，而不是只取单个 `SKILL.md`。
 - 在 [main.py](main.py) 中根据用户输入动态注入 skill 提示词。
 - 在 [web_ui.py](web_ui.py) 中提供 skill 面板、安装入口和删除入口。
 

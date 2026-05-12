@@ -261,10 +261,10 @@ def _parse_github_path(url: str) -> tuple[str, str, str | None, str | None]:
 def _github_archive_candidates(url: str) -> list[str]:
     owner, repo, ref, _subpath = _parse_github_path(url)
     if ref:
-        return [f"https://codeload.github.com/{owner}/{repo}/zip/refs/heads/{ref}"]
+        return [f"https://github.com/{owner}/{repo}/archive/refs/heads/{ref}.zip"]
     return [
-        f"https://codeload.github.com/{owner}/{repo}/zip/refs/heads/main",
-        f"https://codeload.github.com/{owner}/{repo}/zip/refs/heads/master",
+        f"https://github.com/{owner}/{repo}/archive/refs/heads/main.zip",
+        f"https://github.com/{owner}/{repo}/archive/refs/heads/master.zip",
     ]
 
 
@@ -294,6 +294,13 @@ def _github_raw_candidates(url: str, skill_name: str | None = None) -> list[str]
 
 def _normalize_zip_path(name: str) -> str:
     return name.replace("\\", "/").lstrip("/")
+
+
+def _archive_relative_path(path: str, archive_root_name: str | None = None) -> Path:
+    relative = Path(_normalize_zip_path(path))
+    if archive_root_name and relative.parts and relative.parts[0] == archive_root_name:
+        relative = Path(*relative.parts[1:]) if len(relative.parts) > 1 else Path()
+    return relative
 
 
 def _choose_zip_skill_prefix(zf: zipfile.ZipFile, skill_hint: str | None = None, subpath: str | None = None) -> str:
@@ -358,15 +365,7 @@ def install_skill_from_url(url: str, skill_name: str | None = None) -> tuple[Pat
         raise SkillImportError("请输入要安装的 URL")
 
     if _is_github_url(source_url):
-        owner, repo, ref, subpath = _parse_github_path(source_url)
-        if preferred_name or subpath:
-            for raw_url in _github_raw_candidates(source_url, preferred_name):
-                try:
-                    text = _download_text(raw_url)
-                    if text.strip():
-                        return _install_skill_from_markdown_text(text, preferred_name)
-                except (urllib.error.URLError, OSError, SkillImportError):
-                    continue
+        _owner, _repo, _ref, subpath = _parse_github_path(source_url)
         archive_candidates = _github_archive_candidates(source_url)
         last_error: Exception | None = None
         for archive_url in archive_candidates:
@@ -386,10 +385,39 @@ def install_skill_from_url(url: str, skill_name: str | None = None) -> tuple[Pat
                         if not top_dirs:
                             raise SkillImportError("无法解压 GitHub archive")
                         repo_root = top_dirs[0]
+                        target_source: Path | None = None
+                        candidate_rel_paths: list[Path] = []
                         if subpath:
-                            target_source = repo_root / Path(subpath)
-                        else:
-                            target_source = repo_root / Path(skill_prefix)
+                            candidate_rel_paths.append(_archive_relative_path(subpath, repo_root.name))
+                        if preferred_name:
+                            skill_slug = _slugify(preferred_name)
+                            candidate_rel_paths.extend(
+                                [
+                                    Path("skills") / skill_slug,
+                                    Path("skills") / preferred_name,
+                                    Path(skill_slug),
+                                    Path(preferred_name),
+                                ]
+                            )
+                        if skill_prefix:
+                            candidate_rel_paths.append(_archive_relative_path(skill_prefix, repo_root.name))
+
+                        seen_candidates: set[str] = set()
+                        for rel_path in candidate_rel_paths:
+                            rel_key = rel_path.as_posix()
+                            if not rel_key or rel_key in seen_candidates:
+                                continue
+                            seen_candidates.add(rel_key)
+                            candidate = repo_root / rel_path
+                            if candidate.exists() and candidate.is_dir():
+                                target_source = candidate
+                                break
+
+                        if target_source is None:
+                            if subpath:
+                                target_source = repo_root / _archive_relative_path(subpath, repo_root.name)
+                            else:
+                                target_source = repo_root / _archive_relative_path(skill_prefix, repo_root.name)
                         if not target_source.exists() or not target_source.is_dir():
                             raise SkillImportError(f"没有找到 skill 目录: {preferred_name or subpath or 'unknown'}")
                         markdowns = sorted(target_source.glob("*.md"), key=lambda p: p.name.lower())
@@ -429,7 +457,35 @@ def install_skill_from_url(url: str, skill_name: str | None = None) -> tuple[Pat
                 top_dirs = [p for p in extracted_root.iterdir() if p.is_dir()]
                 if not top_dirs:
                     raise SkillImportError("无法解压 skill 压缩包")
-                source_folder = top_dirs[0] / Path(skill_prefix)
+                archive_root = top_dirs[0]
+                candidate_rel_paths: list[Path] = []
+                if preferred_name:
+                    skill_slug = _slugify(preferred_name)
+                    candidate_rel_paths.extend(
+                        [
+                            Path("skills") / skill_slug,
+                            Path("skills") / preferred_name,
+                            Path(skill_slug),
+                            Path(preferred_name),
+                        ]
+                    )
+                if skill_prefix:
+                    candidate_rel_paths.append(_archive_relative_path(skill_prefix, archive_root.name))
+
+                source_folder: Path | None = None
+                seen_candidates: set[str] = set()
+                for rel_path in candidate_rel_paths:
+                    rel_key = rel_path.as_posix()
+                    if not rel_key or rel_key in seen_candidates:
+                        continue
+                    seen_candidates.add(rel_key)
+                    candidate = archive_root / rel_path
+                    if candidate.exists() and candidate.is_dir():
+                        source_folder = candidate
+                        break
+
+                if source_folder is None:
+                    source_folder = archive_root / _archive_relative_path(skill_prefix, archive_root.name)
                 if not source_folder.exists() or not source_folder.is_dir():
                     raise SkillImportError("压缩包里没有找到 skill 目录")
                 markdowns = sorted(source_folder.glob("*.md"), key=lambda p: p.name.lower())

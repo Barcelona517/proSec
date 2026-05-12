@@ -16,7 +16,7 @@ import gradio as gr
 
 from config import HISTORY_FILE, MODEL_NAME, VISION_MODEL, WORKSPACE_ROOT
 from main import load_history, run_agent_stream_with_trace, run_agent_with_trace, save_history
-from skill_manager import delete_skill_folder, import_skill_bundle, install_skill_from_url, parse_skill_install_input, render_skill_catalog_html, scan_skills
+from skill_manager import SkillImportError, delete_skill_folder, import_skill_bundle, install_skill_from_url, parse_skill_install_input, render_skill_catalog_html, scan_skills
 from tooling import ToolRegistry
 from vision_agent import run_vision_agent
 
@@ -484,7 +484,7 @@ def _install_skill_from_link(url: str) -> tuple[str, Any]:
     raw_input = (url or "").strip()
     if not raw_input:
         skills = scan_skills()
-        return render_skill_catalog_html(skills), gr.update(value="")
+        return render_skill_catalog_html(skills), gr.update(value=""), _skill_status_html("请输入要安装的 URL 或命令。", "info")
 
     try:
         parsed_url, parsed_skill_name = parse_skill_install_input(raw_input)
@@ -492,15 +492,22 @@ def _install_skill_from_link(url: str) -> tuple[str, Any]:
         skills = scan_skills()
         _ = folder
         _ = record
-        return render_skill_catalog_html(skills), gr.update(value="")
+        installed_name = record.name or parsed_skill_name or "skill"
+        return render_skill_catalog_html(skills), gr.update(value=""), _skill_status_html(f"已安装：{installed_name}", "success")
     except SkillImportError as exc:
-        gr.Info(str(exc))
         skills = scan_skills()
-        return render_skill_catalog_html(skills), gr.update(value=raw_input)
+        return render_skill_catalog_html(skills), gr.update(value=raw_input), _skill_status_html(str(exc), "error")
     except Exception as exc:  # noqa: BLE001
-        gr.Info(f"URL 安装失败：{exc}")
         skills = scan_skills()
-        return render_skill_catalog_html(skills), gr.update(value=raw_input)
+        return render_skill_catalog_html(skills), gr.update(value=raw_input), _skill_status_html(f"URL 安装失败：{exc}", "error")
+
+
+def _skill_status_html(message: str, kind: str) -> str:
+    text = escape((message or "").strip())
+    if not text:
+        return ""
+    status_kind = kind if kind in {"success", "error", "info"} else "info"
+    return f"<div class='skill-status skill-status-{status_kind}'>{text}</div>"
 
 
 def _delete_skill(skill_folder_name: str) -> tuple[str, Any]:
@@ -1174,6 +1181,7 @@ def build_demo() -> gr.Blocks:
                 elem_id="skill-url-box",
             )
             skill_install_btn = gr.Button("从 URL 安装", elem_id="skill-install-btn")
+            skill_status_html = gr.HTML("", elem_id="skill-status-html")
             skill_folder_box = gr.File(
                 type="filepath",
                 label="skill 文件夹",
@@ -1285,7 +1293,7 @@ def build_demo() -> gr.Blocks:
         skill_install_btn.click(
             fn=_install_skill_from_link,
             inputs=[skill_url_box],
-            outputs=[skill_list_html, skill_url_box],
+            outputs=[skill_list_html, skill_url_box, skill_status_html],
             queue=False,
             show_progress="hidden",
         )
@@ -1511,6 +1519,31 @@ def main() -> None:
     #skill-install-btn:hover,
     #skill-install-btn button:hover {
         background: rgba(16, 185, 129, 0.28);
+    }
+    #skill-status-html {
+        margin: -2px 0 8px 0;
+    }
+    .skill-status {
+        border-radius: 12px;
+        padding: 8px 12px;
+        font-size: 12px;
+        line-height: 1.5;
+        border: 1px solid transparent;
+    }
+    .skill-status-info {
+        background: rgba(148, 163, 184, 0.10);
+        border-color: rgba(148, 163, 184, 0.22);
+        color: #cbd5e1;
+    }
+    .skill-status-success {
+        background: rgba(16, 185, 129, 0.12);
+        border-color: rgba(16, 185, 129, 0.28);
+        color: #a7f3d0;
+    }
+    .skill-status-error {
+        background: rgba(248, 113, 113, 0.12);
+        border-color: rgba(248, 113, 113, 0.28);
+        color: #fecaca;
     }
     #skill-folder-box {
         margin: -2px 0 0 0;
