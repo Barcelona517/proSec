@@ -11,7 +11,7 @@ WORKSPACE_ROOT = Path(os.getenv("AGENT_WORKSPACE_ROOT", BASE_DIR)).resolve()
 SKILL_ROOT = WORKSPACE_ROOT / ".claude" / "skills"
 MODEL_NAME = os.getenv("MODEL_NAME", "deepseek-chat")
 VISION_MODEL = os.getenv("VISION_MODEL", "gpt-4.1-mini")
-MAX_TURNS = int(os.getenv("MAX_TURNS", "8"))
+MAX_TURNS = max(11, int(os.getenv("MAX_TURNS", "11")))
 HISTORY_FILE = Path(os.getenv("HISTORY_FILE", BASE_DIR / "chat_history.json"))
 
 SYSTEM_PROMPT = (
@@ -22,6 +22,7 @@ SYSTEM_PROMPT = (
     "当用户问题涉及当前信息、名词解释、人物、地点、产品、公司、新闻或百科知识时，"
     "优先考虑调用 search_web 获取外部信息，再基于搜索结果作答。\n"
     "当用户需求涉及读取、修改、检查、创建、删除本地文件时，优先使用本地文件工具。\n"
+    "如果当前输入命中了某个 skill，则该 skill 是首要执行路径；必须优先遵循 skill 文件，不要自行改写实现方案，也不要临时切换到其他库、脚本或流程。\n"
     "凡是与文件当前状态有关的问题，例如“文件是否存在”“我刚删除的文件还在吗”“目录里现在有什么”，"
     "都必须重新调用工具做实时检查，不能直接依赖旧对话中的历史结果。\n"
     "不要编造工具执行结果；如果工具失败，要明确说明失败原因。\n"

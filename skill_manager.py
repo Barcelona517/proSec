@@ -547,6 +547,58 @@ def _tokenize(text: str) -> set[str]:
     return {token for token in tokens if token}
 
 
+def _looks_like_presentation_request(text: str) -> bool:
+    lowered = text.lower()
+    hints = (
+        "ppt",
+        "pptx",
+        "powerpoint",
+        "presentation",
+        "slide",
+        "slides",
+        "deck",
+        "幻灯片",
+        "演示文稿",
+        "演示",
+    )
+    return any(hint in lowered for hint in hints)
+
+
+def _looks_like_presentation_skill(skill: SkillRecord) -> bool:
+    haystack = f"{skill.name} {skill.description} {skill.folder.name}".lower()
+    hints = (
+        "ppt",
+        "pptx",
+        "powerpoint",
+        "presentation",
+        "slide",
+        "slides",
+        "deck",
+    )
+    return any(hint in haystack for hint in hints)
+
+
+def _expand_relative_skill_links(content: str, folder: Path) -> str:
+    def replace_link(match: re.Match[str]) -> str:
+        label = match.group(1)
+        target = match.group(2).strip()
+        if not target or re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", target):
+            return match.group(0)
+        if target.startswith(("/", "#", "mailto:", "http://", "https://")):
+            return match.group(0)
+
+        target_path = (folder / target).resolve()
+        try:
+            relative_path = target_path.relative_to(WORKSPACE_ROOT)
+        except ValueError:
+            return match.group(0)
+        if not target_path.exists():
+            return match.group(0)
+        return f"[{label}]({relative_path.as_posix()})"
+
+    return re.sub(r"\[([^\]]+)\]\(([^)]+)\)", replace_link, content)
+
+
 def match_skill(user_input: str, skills: list[SkillRecord] | None = None) -> SkillRecord | None:
     skills = skills if skills is not None else scan_skills()
     if not skills:
@@ -559,6 +611,7 @@ def match_skill(user_input: str, skills: list[SkillRecord] | None = None) -> Ski
     best_skill: SkillRecord | None = None
     best_score = 0
     query_tokens = _tokenize(text)
+    presentation_request = _looks_like_presentation_request(text)
 
     for skill in skills:
         score = 0
@@ -577,6 +630,8 @@ def match_skill(user_input: str, skills: list[SkillRecord] | None = None) -> Ski
                 score += 1
         if description_lower and description_lower in text:
             score += 2
+        if presentation_request and _looks_like_presentation_skill(skill):
+            score += 4
 
         if score > best_score:
             best_score = score
@@ -599,11 +654,15 @@ def build_skill_prompt(user_input: str) -> str:
     if matched is not None:
         lines.append("")
         lines.append(f"已命中 skill: {matched.name}")
+        lines.append("这是一次强制 skill 路由：该 skill 是当前任务的首要执行路径。除非 skill 文档明确允许替代方案，否则不要自行改写实现方案，也不要临时切换到其他库、脚本或流程。")
+        if _looks_like_presentation_skill(matched):
+            lines.append("如果是从零生成或修改 PPT，请严格按 skill 文件中列出的 PPT 创建/编辑工作流执行，优先阅读其中指定的子文档。")
+            lines.append("如果检测到 pptxgenjs 未安装，先执行 npm install -g pptxgenjs，再重新检查，不要改用 python-pptx。")
         lines.append("以下是该 skill 的完整内容，请严格遵循：")
-        lines.append(matched.content.strip())
+        lines.append(_expand_relative_skill_links(matched.content.strip(), matched.folder))
     else:
         lines.append("")
-        lines.append("如果用户意图与上面的某个 skill 匹配，请优先加载并执行对应 skill 文件。")
+        lines.append("如果用户意图与上面的某个 skill 匹配，请优先加载并执行对应 skill 文件；一旦命中，就把该 skill 作为首要执行路径。")
 
     return "\n".join(lines).strip()
 

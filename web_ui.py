@@ -118,6 +118,8 @@ def _persist_conversations(conversations: list[dict], active_id: str) -> None:
     if not persisted:
         if CONVERSATIONS_FILE.exists():
             CONVERSATIONS_FILE.unlink()
+        if HISTORY_FILE.exists():
+            HISTORY_FILE.unlink()
         return
 
     active = next((conv for conv in persisted if conv.get("id") == active_id), persisted[0])
@@ -219,6 +221,19 @@ def _render_trace_cards(trace_steps: list[dict]) -> str:
             + "</details>"
         )
     return "<div class='plan-cards'>" + "".join(cards) + "</div>"
+
+
+def _attach_trace_steps_to_latest_assistant(messages: list[dict], trace_steps: list[dict]) -> list[dict]:
+    if not trace_steps:
+        return list(messages)
+
+    updated = list(messages)
+    for idx in range(len(updated) - 1, -1, -1):
+        item = updated[idx]
+        if isinstance(item, dict) and item.get("role") == "assistant":
+            updated[idx] = {**item, "trace_steps": list(trace_steps)}
+            break
+    return updated
 
 
 def _image_url(image_path: str) -> str:
@@ -441,7 +456,11 @@ def _history_to_chat_messages(agent_history: list[dict]) -> list[dict[str, str]]
         if not isinstance(content, str) or not content.strip():
             continue
         if role == "assistant":
-            chat_messages.append({"role": role, "content": _format_assistant_content("", content)})
+            trace_steps = item.get("trace_steps", [])
+            assistant_content = _format_assistant_content("", content)
+            if isinstance(trace_steps, list) and trace_steps:
+                assistant_content = _render_trace_cards(trace_steps) + assistant_content
+            chat_messages.append({"role": role, "content": assistant_content})
         else:
             chat_messages.append({"role": role, "content": _render_history_user_message(content)})
     return chat_messages
@@ -625,6 +644,7 @@ def _submit_message(
 
         user_content = _build_user_history_content(user_message, final_image_path, selected_file_paths)
         new_agent_history = _replace_last_user_message(new_agent_history, user_content)
+        new_agent_history = _attach_trace_steps_to_latest_assistant(new_agent_history, trace_steps)
 
         current_conv["messages"] = new_agent_history
         if current_conv.get("title") in {"", "新对话"} or len(agent_history) == 0:
@@ -687,7 +707,7 @@ def _submit_message_stream(
     user_content = _build_user_history_content(user_message, final_image_path, selected_file_paths)
     user_display = _render_history_user_message(user_content)
     thinking_messages.append({"role": "user", "content": user_display})
-    thinking_messages.append({"role": "assistant", "content": "<div class='ai-thinking'>思考中...</div>"})
+    thinking_messages.append({"role": "assistant", "content": "<div class='ai-thinking'>正在生成，请稍等...</div>"})
     yield thinking_messages, convs, current_conv_id, user_message, None, None, final_image_path, selected_file_paths, _render_attachment_strip(final_image_path, selected_file_paths), _render_chat_empty_state(False), _render_history_sidebar(convs, current_conv_id)
 
     if final_image_path:
@@ -735,6 +755,7 @@ def _submit_message_stream(
                 trace_steps = list(event.get("trace_steps", []) or [])
 
         new_agent_history = _replace_last_user_message(new_agent_history, user_content)
+        new_agent_history = _attach_trace_steps_to_latest_assistant(new_agent_history, trace_steps)
 
         current_conv["messages"] = new_agent_history
         if current_conv.get("title") in {"", "新对话"} or len(agent_history) == 0:
@@ -1147,7 +1168,7 @@ def build_demo() -> gr.Blocks:
     initial_history_html = _render_history_sidebar(conversations, active_id)
     initial_skill_html = render_skill_catalog_html(INITIAL_SKILLS)
 
-    with gr.Blocks(title="Mini OpenClaw Chat", head=_build_client_script()) as demo:
+    with gr.Blocks(title="Mini OpenClaw Chat") as demo:
         with gr.Row(elem_id="header-row"):
             with gr.Column(scale=1, min_width=0, elem_id="header-left"):
                 gr.HTML(
@@ -1354,7 +1375,7 @@ def main() -> None:
     server_port = _pick_port(preferred_port)
     if server_port != preferred_port:
         print(f"端口 {preferred_port} 已被占用，自动切换到 {server_port}")
-    demo.launch(server_name="127.0.0.1", server_port=server_port, inbrowser=False, css="""
+    demo.launch(server_name="127.0.0.1", server_port=server_port, inbrowser=False, head=_build_client_script(), css="""
     html, body {
         height: 100%;
         margin: 0;
@@ -2160,9 +2181,44 @@ def main() -> None:
         padding-left: 10px;
     }
     .ai-thinking {
-        color: #9ca3af;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        color: #e5e7eb;
         font-size: 14px;
-        letter-spacing: 0.02em;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+        padding: 8px 12px;
+        border-radius: 999px;
+        background: rgba(59, 130, 246, 0.14);
+        border: 1px solid rgba(96, 165, 250, 0.28);
+        box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.18) inset;
+    }
+    .ai-thinking::before {
+        content: "";
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: #60a5fa;
+        box-shadow: 0 0 0 0 rgba(96, 165, 250, 0.5);
+        animation: ai-thinking-pulse 1.2s infinite;
+    }
+    @keyframes ai-thinking-pulse {
+        0% {
+            transform: scale(0.9);
+            box-shadow: 0 0 0 0 rgba(96, 165, 250, 0.5);
+            opacity: 0.7;
+        }
+        70% {
+            transform: scale(1.08);
+            box-shadow: 0 0 0 12px rgba(96, 165, 250, 0);
+            opacity: 1;
+        }
+        100% {
+            transform: scale(0.9);
+            box-shadow: 0 0 0 0 rgba(96, 165, 250, 0);
+            opacity: 0.7;
+        }
     }
     .plan-cards {
         display: flex;

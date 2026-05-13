@@ -7,6 +7,7 @@ from typing import Any, Callable
 import json
 import os
 import re
+import shutil
 import subprocess
 import urllib.error
 import urllib.parse
@@ -17,6 +18,42 @@ import xml.etree.ElementTree as ET
 
 class ToolExecutionError(Exception):
     pass
+
+
+_GLOBAL_NODE_MODULES_PATH: str | None = None
+
+
+def _resolve_global_node_modules_path() -> str | None:
+    global _GLOBAL_NODE_MODULES_PATH
+    if _GLOBAL_NODE_MODULES_PATH is not None:
+        return _GLOBAL_NODE_MODULES_PATH
+
+    npm_cmd = shutil.which("npm.cmd") or shutil.which("npm")
+    if not npm_cmd:
+        _GLOBAL_NODE_MODULES_PATH = None
+        return None
+
+    try:
+        completed = subprocess.run(
+            [npm_cmd, "root", "-g"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            shell=False,
+        )
+    except Exception:
+        _GLOBAL_NODE_MODULES_PATH = None
+        return None
+
+    if completed.returncode != 0:
+        _GLOBAL_NODE_MODULES_PATH = None
+        return None
+
+    value = completed.stdout.strip()
+    _GLOBAL_NODE_MODULES_PATH = value or None
+    return _GLOBAL_NODE_MODULES_PATH
 
 
 def safe_resolve_path(root: Path, user_path: str) -> Path:
@@ -524,20 +561,26 @@ class ToolRegistry:
         if not isinstance(cmd, list) or not cmd or not all(isinstance(x, str) and x.strip() for x in cmd):
             raise ToolExecutionError("command must be a non-empty string array")
 
-        timeout_seconds = int(args.get("timeout_seconds", 8))
+        timeout_seconds = int(args.get("timeout_seconds", 20 if str(cmd[0]).lower() in {"npm", "npx"} else 8))
         if timeout_seconds < 1 or timeout_seconds > 20:
             raise ToolExecutionError("timeout_seconds must be in [1, 20]")
 
         command = [x.strip() for x in cmd]
         program = command[0].lower()
+        allow_node_eval = program == "node" and len(command) >= 2 and command[1] in {"-e", "--eval", "-p", "--print"}
         blocked_chars = {"|", "&&", "||", ";", ">", "<", "$(", "`"}
-        for token in command:
-            if any(sym in token for sym in blocked_chars):
-                raise ToolExecutionError("shell meta characters are not allowed")
+        if not allow_node_eval:
+            for token in command:
+                if any(sym in token for sym in blocked_chars):
+                    raise ToolExecutionError("shell meta characters are not allowed")
 
         allowed = {
-            "python": {"--version", "-V", "-m"},
+            "python": {"--version", "-V", "-m", "scripts/office/soffice.py", "scripts/office/unpack.py", "scripts/office/pack.py", "scripts/clean.py", "scripts/thumbnail.py", "scripts/add_slide.py"},
             "py": {"--version", "-V"},
+            "node": {"--version", "-v"},
+            "npm": {"--version", "-v", "install", "list", "view"},
+            "npx": {"--version", "-v", "pptxgenjs"},
+            "pdftoppm": None,
             "where": None,
             "whoami": None,
             "dir": None,
@@ -558,8 +601,71 @@ class ToolRegistry:
                 pkg = command[4]
                 if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", pkg):
                     raise ToolExecutionError("invalid package name for pip show")
+            elif command[1:3] == ["-m", "markitdown"]:
+                if len(command) != 4:
+                    raise ToolExecutionError("python -m markitdown requires exactly one file path")
+            elif command[1].replace("\\", "/") in {
+                "scripts/office/soffice.py",
+                "scripts/office/unpack.py",
+                "scripts/office/pack.py",
+                "scripts/clean.py",
+                "scripts/thumbnail.py",
+                "scripts/add_slide.py",
+            }:
+                if len(command) < 3:
+                    raise ToolExecutionError("python script invocation requires arguments")
             elif len(command) > 2:
-                raise ToolExecutionError("only python --version / -V or python -m pip show <pkg> are allowed")
+                raise ToolExecutionError("python only allows --version / -V, python -m pip show <pkg>, python -m markitdown <file>, or approved workspace scripts")
+
+        if program == "node":
+            if len(command) == 2 and command[1] in {"--version", "-v"}:
+                pass
+            elif allow_node_eval:
+                if len(command) < 3:
+                    raise ToolExecutionError("node eval requires a code string")
+                if len(command) > 4 and command[1] in {"-p", "--print"}:
+                    raise ToolExecutionError("node print/eval invocation has too many arguments")
+            elif len(command) >= 2 and command[1].lower().endswith((".js", ".mjs", ".cjs")):
+                script_path = safe_resolve_path(self.root, command[1])
+                if not script_path.exists() or not script_path.is_file():
+                    raise ToolExecutionError(f"node script not found: {command[1]}")
+                if len(command) > 16:
+                    raise ToolExecutionError("node script invocation has too many arguments")
+            else:
+                raise ToolExecutionError("node only allows --version, -v, -e/--eval, -p/--print, or a workspace script file")
+
+        if program == "npm":
+            if len(command) == 2 and command[1] in {"--version", "-v"}:
+                pass
+            elif command[1:3] == ["install", "pptxgenjs"] and len(command) == 3:
+                pass
+            elif command[1:4] == ["install", "-g", "pptxgenjs"] and len(command) == 4:
+                pass
+            elif command[1:3] == ["root", "-g"] and len(command) == 3:
+                pass
+            elif command[1:3] == ["list", "pptxgenjs"] and len(command) == 3:
+                pass
+            elif command[1:4] == ["list", "-g", "pptxgenjs"] and len(command) == 4:
+                pass
+            elif command[1:3] == ["view", "pptxgenjs"] and len(command) in {3, 4}:
+                pass
+            else:
+                raise ToolExecutionError("npm only allows version checks, pptxgenjs install/list/view, or the -g install form")
+
+        if program == "npx":
+            if len(command) == 2 and command[1] in {"--version", "-v"}:
+                pass
+            elif command[1] == "pptxgenjs":
+                if len(command) > 16:
+                    raise ToolExecutionError("npx pptxgenjs invocation has too many arguments")
+            else:
+                raise ToolExecutionError("npx only allows version checks or pptxgenjs")
+
+        if program == "pdftoppm":
+            if len(command) < 3:
+                raise ToolExecutionError("pdftoppm requires flags, input PDF, and output prefix")
+            if len(command) > 12:
+                raise ToolExecutionError("pdftoppm invocation has too many arguments")
 
         if program == "where":
             if len(command) != 2:
@@ -579,20 +685,36 @@ class ToolRegistry:
                     cwd=str(self.root),
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=timeout_seconds,
                     shell=False,
                 )
             except subprocess.TimeoutExpired as exc:
                 raise ToolExecutionError(f"command timeout after {timeout_seconds}s") from exc
         else:
+            if program in {"npm", "npx"}:
+                resolved = shutil.which(f"{program}.cmd") or shutil.which(program) or program
+                command = [resolved, *command[1:]]
+            env = os.environ.copy()
+            if program in {"node", "npm", "npx"}:
+                global_node_modules = _resolve_global_node_modules_path()
+                if global_node_modules:
+                    existing_node_path = env.get("NODE_PATH", "").strip()
+                    env["NODE_PATH"] = (
+                        f"{existing_node_path};{global_node_modules}" if existing_node_path else global_node_modules
+                    )
             try:
                 completed = subprocess.run(
                     command,
                     cwd=str(self.root),
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=timeout_seconds,
                     shell=False,
+                    env=env,
                 )
             except subprocess.TimeoutExpired as exc:
                 raise ToolExecutionError(f"command timeout after {timeout_seconds}s") from exc

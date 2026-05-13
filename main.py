@@ -97,7 +97,7 @@ def _looks_like_fresh_file_check(user_input: str) -> bool:
 
 
 def _build_messages(user_input: str, history: list[dict]) -> list[dict]:
-    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}] + history
+    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     if _looks_like_brief_topic_query(user_input):
         messages.append(
@@ -129,11 +129,13 @@ def _build_messages(user_input: str, history: list[dict]) -> list[dict]:
                 "role": "system",
                 "content": (
                     "以下是当前可用的 skill 目录和按需展开后的 skill 内容。"
-                    "当用户意图命中时，请严格遵循对应 skill：\n"
+                    "如果命中任何 skill，就把该 skill 作为首要执行路径；不要先尝试通用方案，再退回 skill。\n"
                     + skill_prompt
                 ),
             }
         )
+
+    messages.extend(history)
 
     messages.append({"role": "user", "content": user_input})
     return messages
