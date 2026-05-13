@@ -139,6 +139,29 @@ proSec/
 怎么实现：
 - 在 [tooling.py](tooling.py) 中限制可执行命令范围。
 - 对参数进行白名单校验，避免危险命令直接透传。
+- 当前 shell 白名单如下：
+	- `python` / `py`
+		- 仅允许 `--version` / `-V`
+		- 仅允许 `python -m pip show <pkg>`
+		- 仅允许 `python -m markitdown <file>`
+		- 仅允许工作区内脚本：`scripts/office/soffice.py`、`scripts/office/unpack.py`、`scripts/office/pack.py`、`scripts/clean.py`、`scripts/thumbnail.py`、`scripts/add_slide.py`
+	- `node`
+		- 仅允许 `--version` / `-v`
+		- 仅允许 `-e` / `--eval` / `-p` / `--print`
+		- 仅允许工作区内的 `.js` / `.mjs` / `.cjs` 脚本
+	- `npm`
+		- 仅允许 `--version` / `-v`
+		- 仅允许 `install pptxgenjs`
+		- 仅允许 `install -g pptxgenjs`
+		- 仅允许 `root -g`
+		- 仅允许 `list pptxgenjs`
+		- 仅允许 `list -g pptxgenjs`
+		- 仅允许 `view pptxgenjs`
+	- `npx`
+		- 仅允许 `--version` / `-v`
+		- 仅允许 `npx pptxgenjs ...`
+	- 其他允许命令：`pdftoppm`、`where <executable>`、`whoami`、`dir`
+- 另外还会拒绝 shell 元字符，例如 `|`、`&&`、`||`、`;`、`>`、`<`、`$(` 和反引号。
 
 涉及文件：
 - [tooling.py](tooling.py)
