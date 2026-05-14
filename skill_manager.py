@@ -657,6 +657,7 @@ def build_skill_prompt(user_input: str) -> str:
         lines.append("这是一次强制 skill 路由：该 skill 是当前任务的首要执行路径。除非 skill 文档明确允许替代方案，否则不要自行改写实现方案，也不要临时切换到其他库、脚本或流程。")
         if _looks_like_presentation_skill(matched):
             lines.append("如果是从零生成或修改 PPT，请严格按 skill 文件中列出的 PPT 创建/编辑工作流执行，优先阅读其中指定的子文档。")
+            lines.append("PPT 相关任务必须走白名单路径：优先使用 skill 文档中要求的 npm / npx pptxgenjs、python -m markitdown 和已批准的 office 脚本，不要临时拼接 python -c、python-pptx 或其他未批准命令。")
             lines.append("如果检测到 pptxgenjs 未安装，先执行 npm install -g pptxgenjs，再重新检查，不要改用 python-pptx。")
         lines.append("以下是该 skill 的完整内容，请严格遵循：")
         lines.append(_expand_relative_skill_links(matched.content.strip(), matched.folder))

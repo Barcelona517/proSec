@@ -2,3 +2,8 @@ __pycache__/
 *.pyc
 chat_history.json
 .env
+.venv/
+conversations.json
+web_ui.log
+web_ui.err
+uploads/

@@ -200,41 +200,95 @@ proSec/
 
 ## 运行方式
 
-### 1. 安装依赖
+### 1. 创建虚拟环境
+
+Windows PowerShell：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+如果你已经有可用的 `.venv`，可以直接激活；没有的话先执行上面的创建命令。
+
+### 2. 安装依赖
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. 配置环境变量
+### 3. 配置环境变量
 
-建议在项目根目录新建 `.env`，至少包含：
+先把 [.env.example](.env.example) 复制成 `.env`，再把里面的 `待填入` 替换成你自己的值。
+
+`.env.example` 的内容如下：
 
 ```env
-OPENAI_API_KEY=你的文本模型Key
-OPENAI_BASE_URL=你的文本模型Base URL
+OPENAI_API_KEY=待填入
+OPENAI_BASE_URL=待填入
 MODEL_NAME=deepseek-chat
-```
+MAX_TURNS=20
+AGENT_WORKSPACE_ROOT=.
+HISTORY_FILE=chat_history.json
+SERPER_API_KEY=待填入
+QQ_EXE_PATH=待填入
 
-如果要启用视觉模型，再补：
-
-```env
-VISION_API_KEY=你的视觉模型Key
-VISION_BASE_URL=你的视觉模型Base URL
+# Auto-reply settings
+# PERSONA_FILE=persona.md
+# AUTO_REPLY_STATE_FILE=auto_reply_state.json
+# AUTO_REPLY_MODEL=deepseek-chat
+AUTO_REPLY_CHATS=待填入
+AUTO_REPLY_INTERVAL_SECONDS=8
+AUTO_REPLY_MESSAGE_LIMIT=20
+AUTO_REPLY_DRY_RUN=true
+AUTO_REPLY_BOOTSTRAP=true
+VISION_API_KEY=待填入
+VISION_BASE_URL=待填入
 VISION_MODEL=qwen3-vl-235b-a22b-thinking
 ```
 
-### 3. 运行命令行版本
+### 4. 运行命令行版本
 
 ```bash
 python main.py
 ```
 
-### 4. 运行网页版本
+### 5. 运行网页版本
 
 ```bash
 python web_ui.py
 ```
 
 默认会在本机启动一个 Gradio 页面。
+
+## 打包与分发建议
+
+如果你要把项目发给别人，建议按下面的方式准备：
+
+1. 保留 [.env.example](.env.example)，不要提交真实的 `.env`。
+2. 不要打包 [.venv](.venv) 虚拟环境，让接收者在本机重新创建。
+3. 只保留源码、README 和 `.env.example`，其余运行时文件按需删除。
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+4. 让接收者把 [.env.example](.env.example) 复制成 `.env`，然后把所有 `待填入` 改成自己的值。
+5. 运行 `pip install -r requirements.txt` 安装依赖。
+6. 首次启动时先运行 `python main.py` 或 `python web_ui.py`，确认模型配置和工作目录可用。
+
+### 发布前检查清单
+
+建议发布前检查这些内容：
+
+- `.env`：不要带真实密钥
+- `.venv`：不要打包虚拟环境
+- `chat_history.json`、`conversations.json`：历史记录文件，可删除
+- `web_ui.log`、`web_ui.err`：日志文件，可删除
+- `uploads/`：上传缓存，可删除
+
+如果仓库里还保留了其他临时脚本、生成文件或个人实验文件，也建议一并清理。
+
+如果需要，我也可以继续帮你把仓库整理成更标准的发布版目录。
 
