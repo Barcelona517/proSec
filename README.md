@@ -260,35 +260,3 @@ python web_ui.py
 ```
 
 默认会在本机启动一个 Gradio 页面。
-
-## 打包与分发建议
-
-如果你要把项目发给别人，建议按下面的方式准备：
-
-1. 保留 [.env.example](.env.example)，不要提交真实的 `.env`。
-2. 不要打包 [.venv](.venv) 虚拟环境，让接收者在本机重新创建。
-3. 只保留源码、README 和 `.env.example`，其余运行时文件按需删除。
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-```
-
-4. 让接收者把 [.env.example](.env.example) 复制成 `.env`，然后把所有 `待填入` 改成自己的值。
-5. 运行 `pip install -r requirements.txt` 安装依赖。
-6. 首次启动时先运行 `python main.py` 或 `python web_ui.py`，确认模型配置和工作目录可用。
-
-### 发布前检查清单
-
-建议发布前检查这些内容：
-
-- `.env`：不要带真实密钥
-- `.venv`：不要打包虚拟环境
-- `chat_history.json`、`conversations.json`：历史记录文件，可删除
-- `web_ui.log`、`web_ui.err`：日志文件，可删除
-- `uploads/`：上传缓存，可删除
-
-如果仓库里还保留了其他临时脚本、生成文件或个人实验文件，也建议一并清理。
-
-如果需要，我也可以继续帮你把仓库整理成更标准的发布版目录。
-
